@@ -1,0 +1,26 @@
+Package: phondisttools
+Title: Tools for Analyzing Phonetic Cue Distributions
+Version: 0.0.3
+Authors@R: person("Dave", "Kleinschmidt", email = "dave.f.kleinschmidt@gmail.com", role = c("aut", "cre"))
+Description: Compute KL divergence and ideal observer classifier performance
+  based on distributions of phonetic cues, estimated from corpora.
+Depends: R (>= 3.4)
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+Imports:
+    mvtnorm (>= 1.0),
+    purrr (>= 0.2.2),
+    purrrlyr (>= 0.0.2),
+    dplyr (>= 0.5),
+    tidyr (>= 0.6.3),
+    lazyeval (>= 0.2.0),
+    assertthat (>= 0.2.0),
+    magrittr (>= 1.5),
+    daver (>= 0.0.3)
+Remotes:
+    github::kleinschmidt/daver
+Suggests:
+    testthat,
+    covr
+RoxygenNote: 6.0.1

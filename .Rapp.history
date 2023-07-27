@@ -1,0 +1,5 @@
+load("/Users/yiminglu/Desktop/thesis_modelling/modelling/dia_results.RData")
+load("/Users/yiminglu/Desktop/thesis_modelling/modelling/gen_results.RData")
+load("/Users/yiminglu/Desktop/thesis_modelling/modelling/dia_results.RData")
+load("/Users/yiminglu/Desktop/thesis_modelling/modelling/gen_results.RData")
+load("/Users/yiminglu/Desktop/thesis_modelling/modelling/gen_KL.RData")

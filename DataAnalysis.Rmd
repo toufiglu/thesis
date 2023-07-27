@@ -1,0 +1,3578 @@
+---
+title: "data_analysis_thesis"
+output:
+  html_document: default
+  pdf_document: default
+---
+#save
+```{r}
+save(list = ls(), file = "data.RData")
+```
+
+#load
+```{r}
+load("data.RData")
+```
+
+# initiate
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# packages
+```{r message = FALSE}
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(RColorBrewer)
+library(tidyverse)
+library(magrittr)
+library(phondisttools)
+library(assertthat)
+library(mvtnorm)
+library(rlang)
+library(mixtools)
+library(tibble)
+library(purrr)
+library(MASS)
+library(dplyr)
+library(caret)
+library(boot)
+library(progressr) #this package is used to track the 1000-fold permutations and bootstrapping
+library(stats)
+library(ggpubr)
+library(tidyr)
+```
+
+# Load files
+```{r read files and sort data}
+
+sort_file_IViE <- function(file_name) {
+  file <- read.csv(file_name)
+  
+  file <- file %>%
+    mutate(Sound.File = str_remove(Sound.File, ".wav")) %>%
+    separate(Sound.File, into = c("dialect", "utterance_type", "speaker"), sep = "-")
+  file <- file %>%
+    separate(utterance_type, into = c("utterance_type", "sent_id"), sep = "(?<=dec|dqu)(?=[1-3])")
+  file <- file %>%
+    separate(speaker, into = c("gender", "speaker_id"), sep = "(?<=f|m)(?=[1-7])")
+
+  file <- file[order(file$dialect, file$utterance_type, file$sent_id, file$gender, file$speaker_id), ]
+  
+  return(file)
+}
+
+sort_file_SVBI <- function(filename) {
+  file <- read.csv(filename)
+  
+  file <- file %>%
+    mutate(Sound.File = str_remove(Sound.File, ".wav")) %>%
+    separate(Sound.File, into = c("dialect", "speaker_id", "utterance_type", "sent_id"), sep = "-")
+  
+  file <- file %>%
+    separate(speaker_id, into = c("gender", "speaker_id"), sep = "(?<=f|m)(?=[1-3])")
+  
+  file <- file[order(file$dialect, file$utterance_type, file$sent_id, file$gender, file$speaker_id), ]
+  
+  return(file)
+}
+
+
+
+#sort the IViE nuclear data table
+IViE_nuclear <- sort_file_IViE("./datafiles/final_IViE.csv")
+IViE_prenuclear <- sort_file_IViE('./datafiles/prenuclear_IViE.csv')
+SVBI_final <- sort_file_SVBI('./datafiles/final_SVBI.csv')
+SVBI_nuclear <- sort_file_SVBI('./datafiles/nuclear_SVBI.csv')
+SVBI_prenuclear <- sort_file_SVBI('./datafiles/prenuclear_SVBI.csv')
+
+IViE_nuclear
+IViE_prenuclear
+SVBI_final
+SVBI_nuclear
+SVBI_prenuclear
+
+```
+
+# Sort table, compute normalized cues
+``` {r}
+#Merge the tables
+# Merge the tables based on multiple columns
+IViE <- merge(IViE_nuclear, IViE_prenuclear, by = c("dialect", "utterance_type", "sent_id", "gender", "speaker_id"))
+merged_table_1 <- merge(SVBI_final, SVBI_nuclear, by = c("dialect", "gender", "speaker_id", "utterance_type", "sent_id"))
+SVBI <- merge(merged_table_1, SVBI_prenuclear, by = c("dialect", "gender", "speaker_id", "utterance_type", "sent_id"))
+
+
+#add a new column called "dataset", with the value of all rows being "ivie" for the modelling of marginal distributions
+IViE <- add_column(IViE, dataset = "ivie", .before = 1)
+SVBI <- add_column(SVBI, dataset = "svbi", .before = 1)
+
+# function to sort the data, create normalization result columns
+transform_dataset <- function(dataset) {
+  # Calculate external normalizations
+  dataset <- dataset %>%
+    mutate(fin_ExtNormalization = final_F0 - Nuclear_f0,
+           prenu_ExtNormalization = prenuclear_F0 - initial_F0,
+           glodiff = final_F0 - prenuclear_F0)
+  
+  # Calculate mean final F0 for each speaker in each dialect
+  mean_final_f0 <- aggregate(final_F0 ~ speaker_id + dialect + gender, data = dataset, FUN = mean, na.rm = TRUE)
+  dataset <- merge(dataset, mean_final_f0, by = c("speaker_id", "dialect", "gender"), suffixes = c("", "_mean"))
+  # Calculate internally normalized final f0
+  dataset$fin_IntNormalization <- dataset$final_F0 - dataset$final_F0_mean
+
+  # Calculate mean final F0 with external normalization for each speaker in each dialect
+  mean_final_f0_ExtNormalization <- aggregate(fin_ExtNormalization ~ speaker_id + dialect + gender, data = dataset, FUN = mean, na.rm = TRUE)
+  dataset <- merge(dataset, mean_final_f0_ExtNormalization, by = c("speaker_id", "dialect", "gender"), suffixes = c("", "_mean"))
+  # Calculate internally + externally normalized final f0
+  dataset$fin_Int_Ext_Normalization <- dataset$fin_ExtNormalization - dataset$fin_ExtNormalization_mean
+
+  # Calculate mean prenuclear F0 for each speaker in each dialect
+  mean_prenu_f0 <- aggregate(prenuclear_F0 ~ speaker_id + dialect + gender, data = dataset, FUN = mean, na.rm = TRUE)
+  dataset <- merge(dataset, mean_prenu_f0, by = c("speaker_id", "dialect", "gender"), suffixes = c("", "_mean"))
+  # Calculate internally normalized prenuclear f0
+  dataset$prenu_IntNormalization <- dataset$Nuclear_f0 - dataset$prenuclear_F0_mean
+
+  # Calculate mean prenuclear F0 with external normalization for each speaker in each dialect
+  mean_prenu_f0_ExtNormalization <- aggregate(prenu_ExtNormalization ~ speaker_id + dialect + gender, data = dataset, FUN = mean, na.rm = TRUE)
+  dataset <- merge(dataset, mean_prenu_f0_ExtNormalization, by = c("speaker_id", "dialect", "gender"), suffixes = c("", "_mean"))
+  # Calculate internally + externally normalized prenuclear f0
+  dataset$prenu_Int_Ext_Normalization <- dataset$prenu_ExtNormalization - dataset$prenu_ExtNormalization_mean
+
+  # Calculate internally normalized glodiff
+  dataset$glodiff_int <- dataset$fin_IntNormalization - dataset$prenu_IntNormalization
+  
+  return(dataset)
+}
+
+IViE <- transform_dataset(IViE)
+SVBI <- transform_dataset(SVBI)
+
+# Split IViE table into two based on utterance_type
+dec_IViE <- IViE %>% filter(utterance_type == "dec")
+dqu_IViE <- IViE %>% filter(utterance_type == "dqu")
+
+dec_SVBI <- SVBI %>% filter(utterance_type == "dec")
+dqu_SVBI <- SVBI %>% filter(utterance_type == "dqu")
+```
+
+
+
+# import train models function from phondisttool, revised for univariate Gaussian distributions
+```{r import trainmodels function from phondisttool, revised for univariate Gaussian distributions}
+
+train_models <- function(data, grouping, cues, add_groups=TRUE) {
+  
+  existing_groups <- data %>% groups()
+  
+  models <-
+    data %>%
+    dplyr::group_by(.dots = grouping, add=add_groups) %>%
+    tidyr::nest() %>%
+    mutate(data = map(data, ~ cue_matrix(.x, cues)),
+           model = purrr::map(data,
+                              ~ list(mu    = apply(., 2, mean),
+                                     Sigma = sd(.))))
+  
+  ## if training groups were added, restore the original groups
+  if (add_groups) {
+    models %>% dplyr::group_by(.dots = existing_groups)
+  } else {
+    models
+  }
+}
+```
+
+
+# Train models for marginal distributions
+```{r Train models for marginal distributions}
+# Define the function to calculate marginal distributions
+calculate_marginal_distributions <- function(data, group_column, variable) {
+  # Train models and calculate marginal distributions
+  marginal_distribution <- train_models(data, group_column, variable, add_groups = TRUE)
+  
+  return(marginal_distribution)
+}
+
+# Calculate marginal distributions for IViE
+marginal_fin_f0_dec_IViE <- calculate_marginal_distributions(dec_IViE, "dataset", "final_F0")
+marginal_fin_f0_dqu_IViE <- calculate_marginal_distributions(dqu_IViE, "dataset", "final_F0")
+marginal_fin_du_dec_IViE <- calculate_marginal_distributions(dec_IViE, "dataset", "final_duration")
+marginal_fin_du_dqu_IViE <- calculate_marginal_distributions(dqu_IViE, "dataset", "final_duration")
+marginal_fin_ext_dec_IViE <- calculate_marginal_distributions(dec_IViE, "dataset", "fin_ExtNormalization")
+marginal_fin_ext_dqu_IViE <- calculate_marginal_distributions(dqu_IViE, "dataset", "fin_ExtNormalization")
+marginal_fin_int_dec_IViE <- calculate_marginal_distributions(dec_IViE, "dataset", "fin_IntNormalization")
+marginal_fin_int_dqu_IViE <- calculate_marginal_distributions(dqu_IViE, "dataset", "fin_IntNormalization")
+marginal_fin_int_ext_dec_IViE <- calculate_marginal_distributions(dec_IViE, "dataset", "fin_Int_Ext_Normalization")
+marginal_fin_int_ext_dqu_IViE <- calculate_marginal_distributions(dqu_IViE, "dataset", "fin_Int_Ext_Normalization")
+marginal_prenu_f0_dec_IViE <- calculate_marginal_distributions(dec_IViE, "dataset", "prenuclear_F0")
+marginal_prenu_f0_dqu_IViE <- calculate_marginal_distributions(dqu_IViE, "dataset", "prenuclear_F0")
+marginal_prenu_ext_dec_IViE <- calculate_marginal_distributions(dec_IViE, "dataset", "prenu_ExtNormalization")
+marginal_prenu_ext_dqu_IViE <- calculate_marginal_distributions(dqu_IViE, "dataset", "prenu_ExtNormalization")
+marginal_prenu_int_dec_IViE <- calculate_marginal_distributions(dec_IViE, "dataset", "prenu_IntNormalization")
+marginal_prenu_int_dqu_IViE <- calculate_marginal_distributions(dqu_IViE, "dataset", "prenu_IntNormalization")
+marginal_prenu_int_ext_dec_IViE <- calculate_marginal_distributions(dec_IViE, "dataset", "prenu_Int_Ext_Normalization")
+marginal_prenu_int_ext_dqu_IViE <- calculate_marginal_distributions(dqu_IViE, "dataset", "prenu_Int_Ext_Normalization")
+marginal_glo_diff_f0_dec_IViE <- calculate_marginal_distributions(dec_IViE, "dataset", "glodiff")
+marginal_glo_diff_f0_dqu_IViE <- calculate_marginal_distributions(dqu_IViE, "dataset", "glodiff")
+marginal_glo_diff_f0_int_dec_IViE <- calculate_marginal_distributions(dec_IViE, "dataset", "glodiff_int")
+marginal_glo_diff_f0_int_dqu_IViE <- calculate_marginal_distributions(dqu_IViE, "dataset", "glodiff_int")
+
+
+# Marginal models for SVBI
+marginal_fin_f0_dec_SVBI <- calculate_marginal_distributions(dec_SVBI, "dataset", "final_F0")
+marginal_fin_f0_dqu_SVBI <- calculate_marginal_distributions(dqu_SVBI, "dataset", "final_F0")
+marginal_fin_du_dec_SVBI <- calculate_marginal_distributions(dec_SVBI, "dataset", "final_duration")
+marginal_fin_du_dqu_SVBI <- calculate_marginal_distributions(dqu_SVBI, "dataset", "final_duration")
+marginal_fin_ext_dec_SVBI <- calculate_marginal_distributions(dec_SVBI, "dataset", "fin_ExtNormalization")
+marginal_fin_ext_dqu_SVBI <- calculate_marginal_distributions(dqu_SVBI, "dataset", "fin_ExtNormalization")
+marginal_fin_int_dec_SVBI <- calculate_marginal_distributions(dec_SVBI, "dataset", "fin_IntNormalization")
+marginal_fin_int_dqu_SVBI <- calculate_marginal_distributions(dqu_SVBI, "dataset", "fin_IntNormalization")
+marginal_fin_int_ext_dec_SVBI <- calculate_marginal_distributions(dec_SVBI, "dataset", "fin_Int_Ext_Normalization")
+marginal_fin_int_ext_dqu_SVBI <- calculate_marginal_distributions(dqu_SVBI, "dataset", "fin_Int_Ext_Normalization")
+marginal_prenu_f0_dec_SVBI <- calculate_marginal_distributions(dec_SVBI, "dataset", "prenuclear_F0")
+marginal_prenu_f0_dqu_SVBI <- calculate_marginal_distributions(dqu_SVBI, "dataset", "prenuclear_F0")
+marginal_prenu_ext_dec_SVBI <- calculate_marginal_distributions(dec_SVBI, "dataset", "prenu_ExtNormalization")
+marginal_prenu_ext_dqu_SVBI <- calculate_marginal_distributions(dqu_SVBI, "dataset", "prenu_ExtNormalization")
+marginal_prenu_int_dec_SVBI <- calculate_marginal_distributions(dec_SVBI, "dataset", "prenu_IntNormalization")
+marginal_prenu_int_dqu_SVBI <- calculate_marginal_distributions(dqu_SVBI, "dataset", "prenu_IntNormalization")
+marginal_prenu_int_ext_dec_SVBI <- calculate_marginal_distributions(dec_SVBI, "dataset", "prenu_Int_Ext_Normalization")
+marginal_prenu_int_ext_dqu_SVBI <- calculate_marginal_distributions(dqu_SVBI, "dataset", "prenu_Int_Ext_Normalization")
+marginal_glo_diff_f0_dec_SVBI <- calculate_marginal_distributions(dec_SVBI, "dataset", "glodiff")
+marginal_glo_diff_f0_dqu_SVBI <- calculate_marginal_distributions(dqu_SVBI, "dataset", "glodiff")
+marginal_glo_diff_f0_int_dec_SVBI <- calculate_marginal_distributions(dec_SVBI, "dataset", "glodiff_int")
+marginal_glo_diff_f0_int_dqu_SVBI <- calculate_marginal_distributions(dqu_SVBI, "dataset", "glodiff_int")
+
+
+```
+
+## Step 1: detection-theoretic d`
+# Table 1 and 2
+#RQ1: what are the acoustic correlates of declarative questions and statements in British English?
+In what follows, I will calculate the reliability for all potential acoustic cues. The contributions of 11 acoustic cues (raw or normalized) are computed by calculating their detection-theoretic d`s. 
+```{r}
+############### Research Question 1: Cue reliability calculation: detection-theoretic d`
+##function for the calculation of detection-theoretic d`
+calculate_d_prime <- function(mu1, mu2, sigma1, sigma2) {
+  # Calculate d' using the provided means and standard deviations
+  d_prime <- (mu1 - mu2)^2 / ((sigma1^2 + sigma2^2)*0.5)
+  
+  return(d_prime)
+}
+
+dt_fin_f0_IViE <- calculate_d_prime(marginal_fin_f0_dec_IViE$model[[1]]$mu, marginal_fin_f0_dqu_IViE$model[[1]]$mu,
+                                    marginal_fin_f0_dec_IViE$model[[1]]$Sigma, marginal_fin_f0_dqu_IViE$model[[1]]$Sigma)
+dt_fin_du_IViE <- calculate_d_prime(marginal_fin_du_dec_IViE$model[[1]]$mu, marginal_fin_du_dqu_IViE$model[[1]]$mu,
+                                    marginal_fin_du_dec_IViE$model[[1]]$Sigma, marginal_fin_du_dqu_IViE$model[[1]]$Sigma)
+dt_fin_ext_IViE <- calculate_d_prime(marginal_fin_ext_dec_IViE$model[[1]]$mu, marginal_fin_ext_dqu_IViE$model[[1]]$mu,
+                                     marginal_fin_ext_dec_IViE$model[[1]]$Sigma, marginal_fin_ext_dqu_IViE$model[[1]]$Sigma)
+dt_fin_int_IViE <- calculate_d_prime(marginal_fin_int_dec_IViE$model[[1]]$mu, marginal_fin_int_dqu_IViE$model[[1]]$mu,
+                                     marginal_fin_int_dec_IViE$model[[1]]$Sigma, marginal_fin_int_dqu_IViE$model[[1]]$Sigma)
+dt_fin_int_ext_IViE <- calculate_d_prime(marginal_fin_int_ext_dec_IViE$model[[1]]$mu, marginal_fin_int_ext_dqu_IViE$model[[1]]$mu,
+                                         marginal_fin_int_ext_dec_IViE$model[[1]]$Sigma, marginal_fin_int_ext_dqu_IViE$model[[1]]$Sigma)
+dt_prenu_f0_IViE <- calculate_d_prime(marginal_prenu_f0_dec_IViE$model[[1]]$mu, marginal_prenu_f0_dqu_IViE$model[[1]]$mu,
+                                      marginal_prenu_f0_dec_IViE$model[[1]]$Sigma, marginal_prenu_f0_dqu_IViE$model[[1]]$Sigma)
+dt_prenu_ext_IViE <- calculate_d_prime(marginal_prenu_ext_dec_IViE$model[[1]]$mu, marginal_prenu_ext_dqu_IViE$model[[1]]$mu,
+                                       marginal_prenu_ext_dec_IViE$model[[1]]$Sigma, marginal_prenu_ext_dqu_IViE$model[[1]]$Sigma)
+dt_prenu_int_IViE <- calculate_d_prime(marginal_prenu_int_dec_IViE$model[[1]]$mu, marginal_prenu_int_dqu_IViE$model[[1]]$mu,
+                                       marginal_prenu_int_dec_IViE$model[[1]]$Sigma, marginal_prenu_int_dqu_IViE$model[[1]]$Sigma)
+dt_prenu_int_ext_IViE <- calculate_d_prime(marginal_prenu_int_ext_dec_IViE$model[[1]]$mu, marginal_prenu_int_ext_dqu_IViE$model[[1]]$mu,
+                                           marginal_prenu_int_ext_dec_IViE$model[[1]]$Sigma, marginal_prenu_int_ext_dqu_IViE$model[[1]]$Sigma)
+dt_glo_diff_f0_IViE <- calculate_d_prime(marginal_glo_diff_f0_dec_IViE$model[[1]]$mu, marginal_glo_diff_f0_dqu_IViE$model[[1]]$mu,
+                                         marginal_glo_diff_f0_dec_IViE$model[[1]]$Sigma, marginal_glo_diff_f0_dqu_IViE$model[[1]]$Sigma)
+dt_glo_diff_f0_int_IViE <- calculate_d_prime(marginal_glo_diff_f0_int_dec_IViE$model[[1]]$mu, marginal_glo_diff_f0_int_dqu_IViE$model[[1]]$mu,
+                                             marginal_glo_diff_f0_int_dec_IViE$model[[1]]$Sigma, marginal_glo_diff_f0_int_dqu_IViE$model[[1]]$Sigma)
+
+
+
+# Calculate d' statistics for each of the nine acoustic cues (including normalized cues) for SVBI
+dt_fin_f0_SVBI <- calculate_d_prime(marginal_fin_f0_dec_SVBI$model[[1]]$mu,
+                                    marginal_fin_f0_dqu_SVBI$model[[1]]$mu,
+                                    marginal_fin_f0_dec_SVBI$model[[1]]$Sigma,
+                                    marginal_fin_f0_dqu_SVBI$model[[1]]$Sigma)
+dt_fin_du_SVBI <- calculate_d_prime(marginal_fin_du_dec_SVBI$model[[1]]$mu,
+                                    marginal_fin_du_dqu_SVBI$model[[1]]$mu,
+                                    marginal_fin_du_dec_SVBI$model[[1]]$Sigma,
+                                    marginal_fin_du_dqu_SVBI$model[[1]]$Sigma)
+dt_fin_ext_SVBI <- calculate_d_prime(marginal_fin_ext_dec_SVBI$model[[1]]$mu,
+                                     marginal_fin_ext_dqu_SVBI$model[[1]]$mu,
+                                     marginal_fin_ext_dec_SVBI$model[[1]]$Sigma,
+                                     marginal_fin_ext_dqu_SVBI$model[[1]]$Sigma)
+dt_fin_int_SVBI <- calculate_d_prime(marginal_fin_int_dec_SVBI$model[[1]]$mu,
+                                     marginal_fin_int_dqu_SVBI$model[[1]]$mu,
+                                     marginal_fin_int_dec_SVBI$model[[1]]$Sigma,
+                                     marginal_fin_int_dqu_SVBI$model[[1]]$Sigma)
+dt_fin_int_ext_SVBI <- calculate_d_prime(marginal_fin_int_ext_dec_SVBI$model[[1]]$mu,
+                                         marginal_fin_int_ext_dqu_SVBI$model[[1]]$mu,
+                                         marginal_fin_int_ext_dec_SVBI$model[[1]]$Sigma,
+                                         marginal_fin_int_ext_dqu_SVBI$model[[1]]$Sigma)
+dt_prenu_f0_SVBI <- calculate_d_prime(marginal_prenu_f0_dec_SVBI$model[[1]]$mu,
+                                      marginal_prenu_f0_dqu_SVBI$model[[1]]$mu,
+                                      marginal_prenu_f0_dec_SVBI$model[[1]]$Sigma,
+                                      marginal_prenu_f0_dqu_SVBI$model[[1]]$Sigma)
+dt_prenu_ext_SVBI <- calculate_d_prime(marginal_prenu_ext_dec_SVBI$model[[1]]$mu,
+                                       marginal_prenu_ext_dqu_SVBI$model[[1]]$mu,
+                                       marginal_prenu_ext_dec_SVBI$model[[1]]$Sigma,
+                                       marginal_prenu_ext_dqu_SVBI$model[[1]]$Sigma)
+dt_prenu_int_SVBI <- calculate_d_prime(marginal_prenu_int_dec_SVBI$model[[1]]$mu,
+                                       marginal_prenu_int_dqu_SVBI$model[[1]]$mu,
+                                       marginal_prenu_int_dec_SVBI$model[[1]]$Sigma,
+                                       marginal_prenu_int_dqu_SVBI$model[[1]]$Sigma)
+dt_prenu_int_ext_SVBI <- calculate_d_prime(marginal_prenu_int_ext_dec_SVBI$model[[1]]$mu,
+                                           marginal_prenu_int_ext_dqu_SVBI$model[[1]]$mu,
+                                           marginal_prenu_int_ext_dec_SVBI$model[[1]]$Sigma,
+                                           marginal_prenu_int_ext_dqu_SVBI$model[[1]]$Sigma)
+dt_glo_diff_f0_SVBI <- calculate_d_prime(marginal_glo_diff_f0_dec_SVBI$model[[1]]$mu,
+                                         marginal_glo_diff_f0_dqu_SVBI$model[[1]]$mu,
+                                         marginal_glo_diff_f0_dec_SVBI$model[[1]]$Sigma,
+                                         marginal_glo_diff_f0_dqu_SVBI$model[[1]]$Sigma)
+dt_glo_diff_f0_int_SVBI <- calculate_d_prime(marginal_glo_diff_f0_int_dec_SVBI$model[[1]]$mu,
+                                             marginal_glo_diff_f0_int_dqu_SVBI$model[[1]]$mu,
+                                             marginal_glo_diff_f0_int_dec_SVBI$model[[1]]$Sigma,
+                                             marginal_glo_diff_f0_int_dqu_SVBI$model[[1]]$Sigma)
+
+
+
+# Calculate the sum of d' values
+sum_d_prime_IViE <- dt_fin_f0_IViE + dt_fin_du_IViE + dt_fin_ext_IViE + dt_fin_int_IViE + dt_fin_int_ext_IViE + dt_prenu_f0_IViE +
+                   dt_prenu_ext_IViE + dt_prenu_int_IViE + dt_prenu_int_ext_IViE + dt_glo_diff_f0_IViE + dt_glo_diff_f0_int_IViE
+
+sum_d_prime_SVBI <- dt_fin_f0_SVBI + dt_fin_du_SVBI + dt_fin_ext_SVBI + dt_fin_int_SVBI + dt_fin_int_ext_SVBI + dt_prenu_f0_SVBI +
+                   dt_prenu_ext_SVBI + dt_prenu_int_SVBI + dt_prenu_int_ext_SVBI + dt_glo_diff_f0_SVBI + dt_glo_diff_f0_int_SVBI
+
+
+calculate_d_prime_results <- function(dt_fin_f0, dt_fin_du, dt_fin_ext, dt_fin_int, dt_fin_int_ext,
+                                      dt_prenu_f0, dt_prenu_ext, dt_prenu_int, dt_prenu_int_ext,
+                                      dt_glo_diff_f0, dt_glo_diff_f0_int, sum_d_prime) {
+  
+  # Calculate the proportions
+  reli_fin_f0 <- dt_fin_f0 / sum_d_prime
+  reli_fin_du <- dt_fin_du / sum_d_prime
+  reli_fin_ext <- dt_fin_ext / sum_d_prime
+  reli_fin_int <- dt_fin_int / sum_d_prime
+  reli_fin_int_ext <- dt_fin_int_ext / sum_d_prime
+  reli_prenu_f0 <- dt_prenu_f0 / sum_d_prime
+  reli_prenu_ext_f0 <- dt_prenu_ext / sum_d_prime
+  reli_prenu_int_f0 <- dt_prenu_int / sum_d_prime
+  reli_prenu_int_ext_f0 <- dt_prenu_int_ext / sum_d_prime
+  reli_glo_diff_f0 <- dt_glo_diff_f0 / sum_d_prime
+  reli_glo_diff_f0_int <- dt_glo_diff_f0_int / sum_d_prime
+
+  # Create a data frame to store the results
+  d_prime_results <- data.frame(Cue = c("Final syllable F0",
+                                        "Final syllable duration",
+                                        "Final syllable F0 externally normalized",
+                                        "Final syllable F0 internally normalized",
+                                        "Final syllable F0 internal + external normalization",
+                                        "Prenuclear Accented syllable F0",
+                                        "Prenuclear Accented syllable F0 externally normalized",
+                                        "Prenuclear Accented syllable F0 internally normalized",
+                                        "Prenuclear Accented syllable F0 internal + external normalization",
+                                        "Global F0 Differences",
+                                        "Global F0 differences internally normalized"),
+                                d_prime = c(dt_fin_f0,
+                                            dt_fin_du,
+                                            dt_fin_ext,
+                                            dt_fin_int,
+                                            dt_fin_int_ext,
+                                            dt_prenu_f0,
+                                            dt_prenu_ext,
+                                            dt_prenu_int,
+                                            dt_prenu_int_ext,
+                                            dt_glo_diff_f0,
+                                            dt_glo_diff_f0_int),
+                                Reliability = c(reli_fin_f0,
+                                                reli_fin_du,
+                                                reli_fin_ext,
+                                                reli_fin_int,
+                                                reli_fin_int_ext,
+                                                reli_prenu_f0,
+                                                reli_prenu_ext_f0,
+                                                reli_prenu_int_f0,
+                                                reli_prenu_int_ext_f0,
+                                                reli_glo_diff_f0,
+                                                reli_glo_diff_f0_int))
+  
+  d_prime_results$Reliability <- round(d_prime_results$Reliability, 3)
+  
+  return(d_prime_results)
+}
+
+d_prime_results_IViE <- calculate_d_prime_results(dt_fin_f0_IViE, dt_fin_du_IViE, dt_fin_ext_IViE, dt_fin_int_IViE, dt_fin_int_ext_IViE,
+                                                  dt_prenu_f0_IViE, dt_prenu_ext_IViE, dt_prenu_int_IViE, dt_prenu_int_ext_IViE,
+                                                  dt_glo_diff_f0_IViE, dt_glo_diff_f0_int_IViE, sum_d_prime_IViE)
+d_prime_results_SVBI <- calculate_d_prime_results(dt_fin_f0_SVBI, dt_fin_du_SVBI, dt_fin_ext_SVBI, dt_fin_int_SVBI, dt_fin_int_ext_SVBI,
+                                                  dt_prenu_f0_SVBI, dt_prenu_ext_SVBI, dt_prenu_int_SVBI, dt_prenu_int_ext_SVBI,
+                                                  dt_glo_diff_f0_SVBI, dt_glo_diff_f0_int_SVBI, sum_d_prime_SVBI)
+
+d_prime_results_IViE
+rownames(d_prime_results_IViE) <- NULL
+
+d_prime_results_SVBI
+rownames(d_prime_results_SVBI) <- NULL
+
+knitr::kable(d_prime_results_IViE)
+knitr::kable(d_prime_results_SVBI)
+
+
+```
+
+# RQ1: scatter plots for any pair of cues
+```{r}
+####Research Question 1: Scatter plots
+# A list for all acoustic cues used in the analysis
+acoustic_cues <- c("final_F0", 
+                   "final_duration",
+                   "fin_ExtNormalization",
+                   "fin_IntNormalization",
+                   "fin_Int_Ext_Normalization",
+                   "prenuclear_F0",
+                   "prenu_ExtNormalization",
+                   "prenu_IntNormalization",
+                   "prenu_Int_Ext_Normalization",
+                   "glodiff",
+                   "glodiff_int")
+
+# Create an empty list to store the scatter plots for IViE
+scatter_plots_IViE <- list()
+
+# Iterate over each pair of cues for IViE
+for (i in 1:(length(acoustic_cues) - 1)) {
+  for (j in (i + 1):length(acoustic_cues)) {
+    # Select the current pair of cues
+    cue1 <- acoustic_cues[i]
+    cue2 <- acoustic_cues[j]
+    
+    # Create a subset of the scatter data for the current pair of cues in IViE
+    scatter_data_IViE <- IViE[, c(cue1, cue2, "utterance_type")]
+    
+    # Create a scatter plot for the current pair of cues in IViE
+    scatter_plot_IViE <- ggplot(data = scatter_data_IViE, aes_string(x = cue2, y = cue1)) +
+      geom_point(color = ifelse(scatter_data_IViE$utterance_type == "dec", "red", "black")) +
+      stat_ellipse(aes(color = NA, fill = utterance_type), geom = "polygon", type = "norm", level = .95, alpha = 0.2) + 
+      labs(x = cue2, y = cue1) +
+      scale_color_manual(values = c("red", "black")) +
+      scale_fill_manual(values = c("red", "black")) +
+      theme_minimal()
+    
+    # Add the scatter plot to the list for IViE
+    scatter_plots_IViE[[paste(cue1, cue2, sep = " vs. ")]] <- scatter_plot_IViE
+  }
+}
+
+# Display each scatter plot separately for IViE
+for (i in 1:length(scatter_plots_IViE)) {
+  print(scatter_plots_IViE[[i]])
+}
+
+# Create an empty list to store the scatter plots for SVBI
+scatter_plots_SVBI <- list()
+
+# Iterate over each pair of cues for SVBI
+for (i in 1:(length(acoustic_cues) - 1)) {
+  for (j in (i + 1):length(acoustic_cues)) {
+    # Select the current pair of cues
+    cue1 <- acoustic_cues[i]
+    cue2 <- acoustic_cues[j]
+    
+    # Create a subset of the scatter data for the current pair of cues in SVBI
+    scatter_data_SVBI <- SVBI[, c(cue1, cue2, "utterance_type")]
+    
+    # Create a scatter plot for the current pair of cues in SVBI
+    scatter_plot_SVBI <- ggplot(data = scatter_data_SVBI, aes_string(x = cue2, y = cue1)) +
+      geom_point(color = ifelse(scatter_data_SVBI$utterance_type == "dec", "red", "black")) +
+      stat_ellipse(aes(color = NA, fill = utterance_type), geom = "polygon", type = "norm", level = .95, alpha = 0.2) + 
+      labs(x = cue2, y = cue1) +
+      scale_color_manual(values = c("red", "black")) +
+      scale_fill_manual(values = c("red", "black")) +
+      theme_minimal()
+    
+    # Add the scatter plot to the list for SVBI
+    scatter_plots_SVBI[[paste(cue1, cue2, sep = " vs. ")]] <- scatter_plot_SVBI
+  }
+}
+
+# Display each scatter plot separately for SVBI
+for (i in 1:length(scatter_plots_SVBI)) {
+  print(scatter_plots_SVBI[[i]])
+}
+
+```
+
+# IViE: the 10 plots
+```{r}
+acoustic_cues <- c("final_F0", "fin_ExtNormalization", "fin_IntNormalization", 
+                   "fin_Int_Ext_Normalization", "prenuclear_F0", "prenu_ExtNormalization", 
+                   "prenu_IntNormalization", "prenu_Int_Ext_Normalization", "glodiff", 
+                   "glodiff_int")
+
+# The cue we are interested in
+target_cue <- "final_duration"
+
+# Create an empty list to store the scatter plots for IViE
+scatter_plots_IViE <- list()
+
+# Iterate over each cue for IViE
+for (i in 1:length(acoustic_cues)) {
+  # Select the current pair of cues
+  cue1 <- target_cue
+  cue2 <- acoustic_cues[i]
+
+  # Create a subset of the scatter data for the current pair of cues in IViE
+  scatter_data_IViE <- IViE[, c(cue1, cue2, "utterance_type")]
+    
+  # Create a scatter plot for the current pair of cues in IViE
+  scatter_plot_IViE <- ggplot(data = scatter_data_IViE, aes_string(x = cue2, y = cue1)) +
+    geom_point(color = ifelse(scatter_data_IViE$utterance_type == "dec", "red", "black")) +
+    stat_ellipse(aes(color = NA, fill = utterance_type), geom = "polygon", type = "norm", level = .95, alpha = 0.2) + 
+    labs(x = cue2, y = cue1) +
+    scale_color_manual(values = c("red", "black")) +
+    scale_fill_manual(values = c("red", "black")) +
+    theme_minimal()
+    
+  # Add the scatter plot to the list for IViE
+  scatter_plots_IViE[[paste(cue1, cue2, sep = " vs. ")]] <- scatter_plot_IViE
+}
+
+# Display each scatter plot separately for IViE
+for (i in 1:length(scatter_plots_IViE)) {
+  print(scatter_plots_IViE[[i]])
+}
+
+##save these plots into a folder
+for (i in 1:length(scatter_plots_IViE)) {
+  # Create a file name for the plot
+  file_name <- paste0("scatter_plot_IViE_", i, ".png")
+  
+  # Save the plot
+  ggsave(filename = file_name, plot = scatter_plots_IViE[[i]], width = 7, height = 7)
+}
+
+```
+
+# SVBI: the 10 plots
+```{r}
+# A list for all acoustic cues used in the analysis
+acoustic_cues <- c("final_F0", "fin_ExtNormalization", "fin_IntNormalization", 
+                   "fin_Int_Ext_Normalization", "prenuclear_F0", "prenu_ExtNormalization", 
+                   "prenu_IntNormalization", "prenu_Int_Ext_Normalization", "glodiff", 
+                   "glodiff_int")
+
+# The cue we are interested in
+target_cue <- "final_duration"
+
+# Create an empty list to store the scatter plots for SVBI
+scatter_plots_SVBI <- list()
+
+# Iterate over each cue for SVBI
+for (i in 1:length(acoustic_cues)) {
+  # Select the current pair of cues
+  cue1 <- target_cue
+  cue2 <- acoustic_cues[i]
+
+  # Create a subset of the scatter data for the current pair of cues in SVBI
+  scatter_data_SVBI <- SVBI[, c(cue1, cue2, "utterance_type")]
+    
+  # Create a scatter plot for the current pair of cues in SVBI
+  scatter_plot_SVBI <- ggplot(data = scatter_data_SVBI, aes_string(x = cue2, y = cue1)) +
+    geom_point(color = ifelse(scatter_data_SVBI$utterance_type == "dec", "red", "black")) +
+    stat_ellipse(aes(color = NA, fill = utterance_type), geom = "polygon", type = "norm", level = .95, alpha = 0.2) + 
+    labs(x = cue2, y = cue1) +
+    scale_color_manual(values = c("red", "black")) +
+    scale_fill_manual(values = c("red", "black")) +
+    theme_minimal()
+    
+  # Add the scatter plot to the list for SVBI
+  scatter_plots_SVBI[[paste(cue1, cue2, sep = " vs. ")]] <- scatter_plot_SVBI
+}
+
+# Display each scatter plot separately for SVBI
+for (i in 1:length(scatter_plots_SVBI)) {
+  print(scatter_plots_SVBI[[i]])
+}
+
+
+```
+
+# RQ2 and RQ3
+Based on the above results, I will only analyse the acoustic cues that are relatively more reliable. To do so, I will exclude "final_duration", "prenuclear_F0", "prenu_ExtNormalization", and "prenu_Int_Ext_Normalization". I further excluded from analysis "glodiff_int",and "fin_ExtNormalization" because they have smaller reliability and genuinely does not provide additional information. Excluding them will make the following computation less time-consuming. After exclusion, I then transform the dataset into a long format for further analysis. The data for RQ2 and RQ3 will be presented together.
+
+# Long format
+```{r}
+# Define common variables
+excluded_columns <- c("final_duration", "prenuclear_F0", "prenu_ExtNormalization", "prenu_Int_Ext_Normalization", "initial_F0", "final_F0_mean",
+                      "fin_ExtNormalization_mean", "prenuclear_F0_mean", "prenu_ExtNormalization_mean", "Nuclear_f0", "glodiff_int",
+                      "fin_ExtNormalization")
+cue_columns <- c("final_F0", 
+                 "fin_IntNormalization", 
+                 "fin_Int_Ext_Normalization",
+                 "prenu_IntNormalization",
+                 "glodiff")
+
+# Create a function to perform operations for a specific dataset
+process_dataset <- function(dataset, dataset_name) {
+  temp_dataset <- dataset
+  for (col in excluded_columns) {
+    temp_dataset[[col]] <- NULL
+  }
+  
+  dataset_long <- temp_dataset %>% 
+    pivot_longer(cols = all_of(cue_columns),
+                 names_to = "cue_type", 
+                 values_to = "cue_value")
+  dataset_long$dataset <- dataset_name
+  
+  return(dataset_long)
+}
+
+# Process IViE dataset
+IViE_long <- process_dataset(IViE, "ivie")
+
+# Process SVBI dataset
+SVBI_long <- process_dataset(SVBI, "svbi")
+SVBI_long
+
+# added the talker column for talker specific models.
+SVBI_long <- SVBI_long %>%
+  mutate(talker = paste(dialect, gender, speaker_id, sep = "-"))
+SVBI_long
+
+cue_types <- unique(IViE_long$cue_type)
+cue_types
+```
+## Step 2:  Univariate Models
+# Modelling: function
+```{r}
+train_models <- function(data, grouping, cues, add_groups=TRUE) {
+
+  existing_groups <- data %>% groups()
+
+  models <-
+    data %>%
+    dplyr::group_by(.dots = grouping, add=add_groups) %>%
+    tidyr::nest() %>%
+    mutate(data = map(data, ~ cue_matrix(.x, cues)),
+           model = purrr::map(data,
+                              ~ list(mu    = apply(., 2, mean),
+                                     Sigma = sd(.))))
+
+  ## if training groups were added, restore the original groups
+  if (add_groups) {
+    models %>% dplyr::group_by(.dots = existing_groups)
+  } else {
+    models
+  }
+}
+```
+
+# IViE/SVBI: Create Gender Models 
+```{r}
+# Function to process dataset, create nested models, and store in a list
+process_gen_dataset_models <- function(dataset, dataset_name, cue_types) {
+  # Create an empty list to store the nested models
+  models_list <- list()
+  
+  # For each cue_type
+  for (cue in cue_types) {
+    # Filter data for the current cue type
+    data_filtered <- dataset %>% filter(cue_type == cue)
+    
+    # Group and nest data for each combination of utterance_type, gender, and dialect
+    nest_data_filtered <- data_filtered %>%
+      group_by(utterance_type) %>%
+      nest()
+    
+    # Apply train_models function and create a new column with models
+    nest_data_filtered <- nest_data_filtered %>%
+      mutate(models = map(data, ~train_models(.x,
+                                              grouping = "gender",
+                                              cues = "cue_value",
+                                              add_groups = TRUE)))
+    
+    # Add the nested data frame with models to the list
+    models_list[[cue]] <- nest_data_filtered
+  }
+  
+  # Add the dataset name to each element of the list
+  models_list <- lapply(models_list, function(x) { x$dataset <- dataset_name; return(x) })
+  
+  return(models_list)
+}
+
+# Process IViE dataset and create nested models
+utt.gen.models_list.IViE <- process_gen_dataset_models(IViE_long, "IViE", cue_types)
+
+# Process SVBI dataset and create nested models
+utt.gen.models_list.SVBI <- process_gen_dataset_models(SVBI_long, "SVBI", cue_types)
+
+utt.gen.models_list.IViE
+utt.gen.models_list.SVBI
+
+```
+
+# IViE/SVBI: Create Dialect Models 
+```{r}
+# Function to process dataset, create nested models based on dialect, and store in a list
+process_dia_dataset_models <- function(dataset, dataset_name, cue_types) {
+  # Create an empty list to store the nested models
+  models_list <- list()
+  
+  # For each cue_type
+  for (cue in cue_types) {
+    # Filter data for the current cue type
+    data_filtered <- dataset %>% filter(cue_type == cue)
+    
+    # Group and nest data for each combination of utterance_type, gender, and dialect
+    nest_data_filtered <- data_filtered %>%
+      group_by(utterance_type) %>%
+      nest()
+    
+    # Apply train_models function and create a new column with models
+    nest_data_filtered <- nest_data_filtered %>%
+      mutate(models = map(data, ~train_models(.x,
+                                              grouping = "dialect",
+                                              cues = "cue_value",
+                                              add_groups = TRUE)))
+    
+    # Add the nested data frame with models to the list
+    models_list[[cue]] <- nest_data_filtered
+  }
+  
+  # Add the dataset name to each element of the list
+  models_list <- lapply(models_list, function(x) { x$dataset <- dataset_name; return(x) })
+  
+  return(models_list)
+}
+
+# Process IViE dataset and create nested models based on dialect
+utt.dia.models_list.IViE <- process_dia_dataset_models(IViE_long, "IViE", cue_types)
+
+# Process SVBI dataset and create nested models based on dialect
+utt.dia.models_list.SVBI <- process_dia_dataset_models(SVBI_long, "SVBI", cue_types)
+utt.dia.models_list.SVBI
+utt.dia.models_list.IViE
+
+
+```
+
+# IViE/SVBI: Create gender+dialect models
+```{r}
+# Function to process dataset, create nested models based on utterance_type, gender, and dialect, and store in a list
+process_gen_dia_dataset_models <- function(dataset, dataset_name, cue_types) {
+  # Create an empty list to store the nested models
+  models_list <- list()
+  
+  # For each cue_type
+  for (cue in cue_types) {
+    # Filter data for the current cue type
+    data_filtered <- dataset %>% filter(cue_type == cue)
+    
+    # Group and nest data for each combination of utterance_type, gender, and dialect
+    nest_data_filtered <- data_filtered %>%
+      group_by(utterance_type, gender) %>%
+      nest()
+    
+    # Apply train_models function and create a new column with models
+    nest_data_filtered <- nest_data_filtered %>%
+      mutate(models = map(data, ~train_models(.x,
+                                              grouping = "dialect",
+                                              cues = "cue_value",
+                                              add_groups = TRUE)))
+    
+    # Add the nested data frame with models to the list
+    models_list[[cue]] <- nest_data_filtered
+  }
+  
+  # Add the dataset name to each element of the list
+  models_list <- lapply(models_list, function(x) { x$dataset <- dataset_name; return(x) })
+  
+  return(models_list)
+}
+
+# Process IViE dataset and create nested models based on utterance_type, gender, and dialect
+utt.gen.dia.models_list.IViE <- process_gen_dia_dataset_models(IViE_long, "IViE", cue_types)
+
+# Process SVBI dataset and create nested models based on utterance_type, gender, and dialect
+utt.gen.dia.models_list.SVBI <- process_gen_dia_dataset_models(SVBI_long, "SVBI", cue_types)
+
+utt.gen.dia.models_list.IViE$glodiff
+utt.gen.dia.models_list.SVBI$final_F0$gender
+
+```
+
+The order of rows for the two datasets are not the same. Therefore, we need to match them.
+```{r}
+# Iterate over the cues
+for (cue in names(utt.gen.dia.models_list.IViE)) {
+
+  # Create a new vector that represents the desired order
+  desired_order <- paste(utt.gen.dia.models_list.SVBI[[cue]]$gender,
+                         utt.gen.dia.models_list.SVBI[[cue]]$utterance_type, 
+                         sep="_")
+
+  # Create a similar vector for the current order in IViE list
+  current_order_IViE <- paste(utt.gen.dia.models_list.IViE[[cue]]$gender,
+                              utt.gen.dia.models_list.IViE[[cue]]$utterance_type, 
+                              sep="_")
+
+  # Generate a vector of indices that would arrange current_order_IViE to match desired_order
+  order_index <- match(desired_order, current_order_IViE)
+
+  # Reorder the rows of the data frame in IViE based on this index
+  utt.gen.dia.models_list.IViE[[cue]] <- utt.gen.dia.models_list.IViE[[cue]][order_index, ]
+}
+
+
+```
+
+# SVBI: Create talker specific models
+```{r}
+# Function to process dataset, create nested models, and store in a list
+process_tal_dataset_models <- function(dataset, dataset_name, cue_types) {
+  # Create an empty list to store the nested models
+  models_list <- list()
+  
+  # For each cue_type
+  for (cue in cue_types) {
+    # Filter data for the current cue type
+    data_filtered <- dataset %>% filter(cue_type == cue)
+    
+    # Group and nest data for each combination of utterance_type, speaker, and dialect
+    nest_data_filtered <- data_filtered %>%
+      group_by(utterance_type) %>%
+      nest()
+    
+    # Apply train_models function and create a new column with models
+    nest_data_filtered <- nest_data_filtered %>%
+      mutate(models = map(data, ~train_models(.x,
+                                              grouping = "talker",  # Change to speaker
+                                              cues = "cue_value",
+                                              add_groups = TRUE)))
+    
+    # Add the nested data frame with models to the list
+    models_list[[cue]] <- nest_data_filtered
+  }
+  
+  # Add the dataset name to each element of the list
+  models_list <- lapply(models_list, function(x) { x$dataset <- dataset_name; return(x) })
+  
+  return(models_list)
+}
+
+# Process SVBI dataset and create nested models
+utt.tal.models_list.SVBI <- process_tal_dataset_models(SVBI_long, "SVBI", cue_types)
+utt.tal.models_list.SVBI
+```
+
+# IViE/SVBI: Create Marginal Distributions (repeated, just for the five cues)
+```{r}
+# Function to process dataset, create nested models based on utterance_type and dataset, and store in a list
+process_mar_dataset_models <- function(dataset, dataset_name, cue_types) {
+  # Create an empty list to store the nested models
+  models_list <- list()
+  
+  # For each cue_type
+  for (cue in cue_types) {
+    # Filter data for the current cue type
+    data_filtered <- dataset %>% filter(cue_type == cue)
+    
+    # Group and nest data for each combination of utterance_type and dataset
+    nest_data_filtered <- data_filtered %>%
+      group_by(utterance_type) %>%
+      nest()
+    
+    # Apply train_models function and create a new column with models
+    nest_data_filtered <- nest_data_filtered %>%
+      mutate(models = map(data, ~train_models(.x,
+                                              grouping = "dataset",
+                                              cues = "cue_value",
+                                              add_groups = TRUE)))
+    
+    # Add the nested data frame with models to the list
+    models_list[[cue]] <- nest_data_filtered
+  }
+  
+  # Add the dataset name to each element of the list
+  models_list <- lapply(models_list, function(x) { x$dataset <- dataset_name; return(x) })
+  
+  return(models_list)
+}
+
+# Process IViE dataset and create nested models based on utterance_type and dataset
+utt.mar.models_list.IViE <- process_mar_dataset_models(IViE_long, "IViE", cue_types)
+
+# Process SVBI dataset and create nested models based on utterance_type and dataset
+utt.mar.models_list.SVBI <- process_mar_dataset_models(SVBI_long, "SVBI", cue_types)
+
+utt.mar.models_list.IViE
+utt.mar.models_list.SVBI
+
+
+```
+## Step 3: informativity
+Below is the function used to obtain KL divergence between two univariate Gaussian distributions. 
+# KL divergence: Function
+```{r}
+KL_uvnorm <- function(mu1, sigma1, mu2, sigma2) {
+  assert_that(is.numeric(mu1))
+  assert_that(is.numeric(mu2))
+  
+  # variance for true distribution
+  sigma1 <- as.numeric(sigma1)
+  
+  # variance for marginal distribution
+  sigma2 <- as.numeric(sigma2)
+  
+  assert_that(is.numeric(sigma1))
+  assert_that(is.numeric(sigma2))
+  
+  ## ------------------
+  ## (Dividing by log(2) gives KL in bits)
+  kl <- (log(sigma2/sigma1) + (sigma1^2 + (mu1 - mu2)^2) / (2 * sigma2^2) - 0.5) / log(2)
+
+  return(kl)
+}
+
+
+KL_mods <- function(mod1, mod2) {
+  KL_uvnorm(mod1$mu, mod1$Sigma, mod2$mu, mod2$Sigma)
+}
+```
+
+
+## IViE/SVBI: Gender
+```{r}
+fit_model_to_data <- function(data) {
+  train_models(data, grouping = "gender", cues = "cue_value", add_groups = TRUE)
+}
+
+calculate_permutation_pvalue_gen <- function(gen_models, mar_models, n_permutations = 1000) {
+  set.seed(123)
+  p_values <- list()
+  kl_values <- list()  # For storing KL values
+
+  for (cue in names(gen_models)) {
+    cue_p_values <- list()
+    cue_kl_values <- list()  # For this cue
+
+    for (i in seq_len(length(gen_models[[cue]]$models))) {
+      
+      # Calculate KL values directly
+      kl_f <- KL_mods(gen_models[[cue]]$models[[i]]$model[[1]],
+                      mar_models[[cue]]$models[[i]]$model[[1]])
+      kl_m <- KL_mods(gen_models[[cue]]$models[[i]]$model[[2]],
+                      mar_models[[cue]]$models[[i]]$model[[1]])
+
+      cue_kl_values[[i]] <- list(female = kl_f, male = kl_m)
+
+      # Permutation
+      kl_perm_f <- numeric(n_permutations)
+      kl_perm_m <- numeric(n_permutations)
+
+      for (j in seq_len(n_permutations)) {
+        permuted_data <- gen_models[[cue]]$data[[i]]
+        # Shuffle 'gender' labels for all data points
+        permuted_data$gender <- sample(permuted_data$gender)
+        permuted_model <- fit_model_to_data(permuted_data)
+        permuted_model <- permuted_model[order(match(permuted_model$gender,
+                                                     gen_models$cue$models[[1]]$gender)), ]
+
+        kl_perm_f[j] <- KL_mods(permuted_model$model[[1]],
+                                mar_models[[cue]]$models[[i]]$model[[1]])
+        kl_perm_m[j] <- KL_mods(permuted_model$model[[2]],
+                                mar_models[[cue]]$models[[i]]$model[[1]])
+        print(paste("Permutation", j, "out of", n_permutations,
+                    "completed for cue", cue, ", model", i))
+        
+      }
+
+      p_value_f <- sum(kl_perm_f >= kl_f) / n_permutations
+      p_value_m <- sum(kl_perm_m >= kl_m) / n_permutations
+      
+      cue_p_values[[i]] <- list(female = p_value_f, male = p_value_m)
+      
+    }
+
+    p_values[[cue]] <- cue_p_values
+    kl_values[[cue]] <- cue_kl_values  # Add to list of all KL values
+  }
+
+  return(list(p_values = p_values, kl_values = kl_values))
+}
+
+
+gen.KL.IViE <- calculate_permutation_pvalue_gen(utt.gen.models_list.IViE,
+                                                utt.mar.models_list.IViE)
+gen.KL.SVBI <- calculate_permutation_pvalue_gen(utt.gen.models_list.SVBI,
+                                                utt.mar.models_list.SVBI)
+gen.KL.IViE
+gen.KL.SVBI
+
+# save results for future reference
+save(gen.KL.IViE, gen.KL.SVBI, file = "./RData/gen_KL.RData")
+load("./RData/gen_KL.RData")
+```
+The meaning of these results can be interpreted as, for example, "how much does the distribution of male talkers` declarative statements from all statements." To visualize these results in a table.
+#Table 3 and 4
+```{r}
+create_df <- function(cue, data) {
+  data.frame(
+    Gender = c("female_dec", "male_dec", "female_dqu", "male_dqu"),
+    p_values = c(data$p_values[[cue]][[1]]$female,
+                 data$p_values[[cue]][[1]]$male,
+                 data$p_values[[cue]][[2]]$female,
+                 data$p_values[[cue]][[2]]$male),
+    kl_values = c(data$kl_values[[cue]][[1]]$female,
+                  data$kl_values[[cue]][[1]]$male,
+                  data$kl_values[[cue]][[2]]$female,
+                  data$kl_values[[cue]][[2]]$male)
+  )
+}
+cues <- c("final_F0", "fin_IntNormalization", "fin_Int_Ext_Normalization", "prenu_IntNormalization", "glodiff")
+# Use lapply to apply the function to each cue
+tables.IViE <- setNames(lapply(cues, create_df, data = gen.KL.IViE), cues)
+tables.SVBI <- setNames(lapply(cues, create_df, data = gen.KL.SVBI), cues)
+
+
+# list of table captions
+captions <- c("Final syllable F0", "Final syllable F0 Internal Normalization", "Final syllable F0 Internal+External Normalization", "Prenuclear accent Internal Normalization", "Global F0 differences")
+
+# print each table with knitr::kable()
+for (i in seq_along(tables.IViE)) {
+  print(knitr::kable(tables.IViE[[i]], caption = captions[i], digits = 3, row.names = FALSE))
+}
+
+for (i in seq_along(tables.SVBI)) {
+  print(knitr::kable(tables.SVBI[[i]], caption = captions[i], digits = 3, row.names = FALSE))
+}
+
+```
+
+
+
+The average information gain over males and females, and over declarative statements and questions, could make more sense theoretically. And this is what we will turn to in the next code chunk. 
+
+# by gender; by utterance type; all
+```{r warning=FALSE}
+fit_model_to_data <- function(data) {
+  train_models(data, grouping = "gender", cues = "cue_value", add_groups = TRUE)
+}
+
+calculate_average_over_gen <- function(gen_models,
+                                           mar_models,
+                                           n_permutations = 1000) {
+  set.seed(123)
+  p_values <- list()
+  kl_values <- list()  # For storing KL values
+
+  for (cue in names(gen_models)) {
+    # Calculate KL divergence for females and males separately
+    kl_f_dec <- KL_mods(gen_models[[cue]]$models[[1]]$model[[1]],
+                        mar_models[[cue]]$models[[1]]$model[[1]])
+    kl_m_dec <- KL_mods(gen_models[[cue]]$models[[1]]$model[[2]],
+                        mar_models[[cue]]$models[[1]]$model[[1]])
+    kl_f_dqu <- KL_mods(gen_models[[cue]]$models[[2]]$model[[1]],
+                        mar_models[[cue]]$models[[2]]$model[[1]])
+    kl_m_dqu <- KL_mods(gen_models[[cue]]$models[[2]]$model[[2]],
+                        mar_models[[cue]]$models[[2]]$model[[1]])
+
+    # Average KL divergences for females and males
+    kl_f <- (kl_f_dec + kl_f_dqu) / 2
+    kl_m <- (kl_m_dec + kl_m_dqu) / 2
+    
+    kl_gen_dec <- (kl_f_dec + kl_m_dec) / 2
+    kl_gen_dqu <- (kl_f_dqu + kl_m_dqu) / 2
+    
+    kl_gen_all <- (kl_gen_dec + kl_gen_dqu) / 2
+
+    # Permutation
+    kl_perm_f <- numeric(n_permutations)
+    kl_perm_m <- numeric(n_permutations)
+    kl_perm_gen_dec <- numeric(n_permutations)
+    kl_perm_gen_dqu <- numeric(n_permutations)
+    kl_perm_gen_all <- numeric(n_permutations)
+
+    for (j in seq_len(n_permutations)) {
+      permuted_data_dec <- gen_models[[cue]]$data[[1]]
+      permuted_data_dqu <- gen_models[[cue]]$data[[2]]
+      
+      permuted_data_dec$gender <- sample(permuted_data_dec$gender)
+      permuted_data_dqu$gender <- sample(permuted_data_dqu$gender)
+      
+      permuted_model_dec <- fit_model_to_data(permuted_data_dec)
+      permuted_model_dqu <- fit_model_to_data(permuted_data_dqu)
+
+      permuted_model_dec <- permuted_model_dec[order(match(permuted_model_dec$gender,
+                                                     gen_models$cue$models[[1]]$gender)), ]
+      permuted_model_dqu <- permuted_model_dqu[order(match(permuted_model_dqu$gender,
+                                                     gen_models$cue$models[[1]]$gender)), ]
+
+      kl_perm_f_dec <- KL_mods(permuted_model_dec$model[[1]],
+                               mar_models[[cue]]$models[[1]]$model[[1]])
+      kl_perm_m_dec <- KL_mods(permuted_model_dec$model[[2]],
+                               mar_models[[cue]]$models[[1]]$model[[1]])
+      kl_perm_f_dqu <- KL_mods(permuted_model_dqu$model[[1]],
+                               mar_models[[cue]]$models[[2]]$model[[1]])
+      kl_perm_m_dqu <- KL_mods(permuted_model_dqu$model[[2]],
+                               mar_models[[cue]]$models[[2]]$model[[1]])
+      
+      kl_perm_f[j] <- (kl_perm_f_dec + kl_perm_f_dqu) / 2
+      kl_perm_m[j] <- (kl_perm_m_dec + kl_perm_m_dqu) / 2
+      kl_perm_gen_dec[j] <- (kl_perm_f_dec + kl_perm_m_dec) / 2
+      kl_perm_gen_dqu[j] <- (kl_perm_f_dqu + kl_perm_m_dqu) / 2
+      kl_perm_gen_all[j] <- (kl_perm_gen_dec + kl_perm_gen_dqu) / 2
+      
+      
+    }
+
+    # Calculate p-values
+    p_value_f <- sum(kl_perm_f >= kl_f) / n_permutations
+    p_value_m <- sum(kl_perm_m >= kl_m) / n_permutations
+    p_value_gen_dec <- sum(kl_perm_gen_dec >= kl_gen_dec) / n_permutations
+    p_value_gen_dqu <- sum(kl_perm_gen_dqu >= kl_gen_dqu) / n_permutations
+    p_value_gen_all <- sum(kl_perm_gen_all >= kl_gen_all) / n_permutations
+    
+
+    p_values[[cue]] <- list(female = p_value_f,
+                            male = p_value_m,
+                            statements = p_value_gen_dec,
+                            questions = p_value_gen_dqu,
+                            all = p_value_gen_all)
+    
+    kl_values[[cue]] <- list(female = kl_f,
+                             male = kl_m,
+                             statements = kl_gen_dec,
+                             questions = kl_gen_dqu,
+                             all = kl_gen_all)
+  }
+
+  return(list(p_values = p_values, kl_values = kl_values))
+}
+
+gen.KL.average.IViE <- calculate_average_over_gen(utt.gen.models_list.IViE,
+                                                utt.mar.models_list.IViE)
+
+gen.KL.average.SVBI <- calculate_average_over_gen(utt.gen.models_list.SVBI,
+                                                utt.mar.models_list.SVBI)
+
+gen.KL.average.IViE
+gen.KL.average.SVBI
+
+
+
+```
+
+#Table 5 and 6
+```{r}
+cues <- c("final_F0", "fin_IntNormalization", "fin_Int_Ext_Normalization", "prenu_IntNormalization", "glodiff")
+
+create_df_IViE <- function(cue) {
+  data.frame(
+    Gender = c("female", "male", "gen_dec", "gen_dqu", "gen_all"),
+    p_values = unlist(gen.KL.average.IViE$p_values[[cue]]),
+    kl_values = unlist(sapply(gen.KL.average.IViE$kl_values[[cue]], function(x) x[[1]])) # extract the first element from the kl_values list
+  )
+}
+
+create_df_SVBI <- function(cue) {
+  data.frame(
+    Gender = c("female", "male", "gen_dec", "gen_dqu", "gen_all"),
+    p_values = unlist(gen.KL.average.SVBI$p_values[[cue]]),
+    kl_values = unlist(sapply(gen.KL.average.SVBI$kl_values[[cue]], function(x) x[[1]])) # extract the first element from the kl_values list
+  )
+}
+
+# Now use lapply to apply this function to each cue and create a named list of data frames
+gen.KL.average.IViE.table <- setNames(lapply(cues, create_df_IViE), cues)
+gen.KL.average.SVBI.table <- setNames(lapply(cues, create_df_SVBI), cues)
+
+# list of table captions
+captions <- c("Final syllable F0", "Final syllable F0 Internal Normalization", "Final syllable F0 Internal+Extermal Normalization", "Prenuclear accent Internal Normalization", "Global F0 differences")
+
+# print each table with knitr::kable()
+for (i in seq_along(gen.KL.average.IViE.table)) {
+  print(knitr::kable(gen.KL.average.IViE.table[[i]], caption = captions[i], digits = 3, row.names = FALSE))
+}
+
+for (i in seq_along(gen.KL.average.SVBI.table)) {
+  print(knitr::kable(gen.KL.average.SVBI.table[[i]], caption = captions[i], digits = 3, row.names = FALSE))
+}
+
+```
+
+
+## IViE/SVBI: Dialect
+```{r}
+fit_model_to_data <- function(data) {
+  train_models(data, grouping = "dialect", cues = "cue_value", add_groups = TRUE)
+}
+
+calculate_permutation_pvalue_dia <- function(dia_models, mar_models, n_permutations = 1000) {
+  set.seed(123)  
+  p_values <- list()
+  kl_values <- list()  
+
+  for (cue in names(dia_models)) {
+    dia_p_values <- list()
+    dia_kl_values <- list()  
+
+    for (i in seq_len(length(dia_models[[cue]]$models))) {
+      # i here iterate over declarative statements [1] and questions [2]
+      # Calculate KL values directly
+      kl <- numeric(length(dia_models[[cue]]$models[[i]]$model))
+      for (d in seq_len(length(dia_models[[cue]]$models[[i]]$model))) {
+        kl[d] <- KL_mods(dia_models[[cue]]$models[[i]]$model[[d]],
+                         mar_models[[cue]]$models[[i]]$model[[1]])
+      }
+
+      dia_kl_values[[i]] <- kl
+
+      # Permutation
+      kl_perm <- matrix(numeric(n_permutations * length(dia_models[[cue]]$models[[i]]$model)),
+                        nrow=n_permutations)
+
+      for (j in seq_len(n_permutations)) {
+        permuted_data <- dia_models[[cue]]$data[[i]]
+        permuted_data$dialect <- sample(permuted_data$dialect)
+        permuted_model <- fit_model_to_data(permuted_data)
+        permuted_model <- permuted_model[order(match(permuted_model$dialect,
+                                                     dia_models$cue$models[[1]]$dialect)), ]
+
+        for (d in seq_len(length(dia_models[[cue]]$models[[i]]$model))) {
+          kl_perm[j, d] <- KL_mods(permuted_model$model[[d]],
+                                   mar_models[[cue]]$models[[i]]$model[[1]])
+        }
+        
+        print(paste("Permutation", j, "out of", n_permutations,
+                    "completed for dialect", cue, ", model", i))
+      }
+
+      p_value <- colSums(kl_perm >= kl) / n_permutations
+      dia_p_values[[i]] <- p_value
+      
+    }
+
+    p_values[[cue]] <- dia_p_values
+    kl_values[[cue]] <- dia_kl_values  # Add to list of all KL values
+  }
+
+  return(list(p_values = p_values, kl_values = kl_values))
+}
+
+
+dia.KL.IViE <- calculate_permutation_pvalue_dia(utt.dia.models_list.IViE, 
+                                                utt.mar.models_list.IViE)
+dia.KL.SVBI <- calculate_permutation_pvalue_dia(utt.dia.models_list.SVBI, 
+                                                utt.mar.models_list.SVBI)
+dia.KL.IViE
+dia.KL.SVBI
+save (dia.KL.IViE, dia.KL.SVBI, file = "./RData/dia_KL.RData")
+load("./RData/dia_KL.RData")
+```
+
+#Table 7 and 8
+```{r}
+create_df_IViE <- function(cue, data) {
+  data.frame(
+    Dialects = rep(c("Belfast", "Cambridge", "Dublin", "London", "Leeds", 
+                     "Newcastle", "Bradford", "Liverpool", "Cardiff"), times = 2),
+    Conditions = c(rep("dec", times = 9), rep("dqu", times = 9)),
+    p_values = c(data$p_values[[cue]][[1]], 
+                 data$p_values[[cue]][[2]]),
+    kl_values = c(data$kl_values[[cue]][[1]],
+                  data$kl_values[[cue]][[2]])
+  )
+}
+
+create_df_SVBI <- function(cue, data) {
+  data.frame(
+    Dialects = rep(c("Belfast", "Cambridge", "Newcastle"), times = 2),
+    Conditions = c(rep("dec", times = 3), rep("dqu", times = 3)),
+    P_values = c(data$p_values[[cue]][[1]], data$p_values[[cue]][[2]]),
+    KL_values = c(data$kl_values[[cue]][[1]], data$kl_values[[cue]][[2]])
+  )
+}
+
+
+cues <- c("final_F0", "fin_IntNormalization", "fin_Int_Ext_Normalization", "prenu_IntNormalization", "glodiff")
+
+# Use lapply to apply the function to each cue
+dia.KL.IViE.table <- setNames(lapply(cues, create_df_IViE, data = dia.KL.IViE), cues)
+dia.KL.SVBI.table <- setNames(lapply(cues, create_df_SVBI, data = dia.KL.SVBI), cues)
+
+# list of table captions
+captions <- c("Final syllable F0", "Final syllable F0 Internal Normalization", "Final syllable F0 Internal+Extermal Normalization", "Prenuclear accent Internal Normalization", "Global F0 differences")
+
+# print each table with knitr::kable()
+for (i in seq_along(dia.KL.IViE.table)) {
+  print(knitr::kable(dia.KL.IViE.table[[i]], caption = captions[i], digits = 3, row.names = FALSE))
+}
+
+for (i in seq_along(dia.KL.SVBI.table)) {
+  print(knitr::kable(dia.KL.SVBI.table[[i]], caption = captions[i], digits = 3, row.names = FALSE))
+}
+```
+
+# by utterance type; all
+```{r}
+fit_model_to_data <- function(data) {
+  train_models(data, grouping = "dialect", cues = "cue_value", add_groups = TRUE)
+}
+
+calculate_average_over_dia <- function(dia_models, mar_models, n_permutations = 1000) {
+  set.seed(123)
+  p_values <- list()
+  kl_values <- list()  # For storing KL values
+
+  for (cue in names(dia_models)) {
+    dia_p_values <- list()
+    dia_kl_all <- list()
+    dia_kl_dec <- list()
+    dia_kl_dqu <- list()
+    dialects <- dia_models[[cue]]$models[[1]]$dialect
+
+    for (i in seq_along(dialects)) {
+      dialect <- dialects[i]
+      kl_dec <- KL_mods(dia_models[[cue]]$models[[1]]$model[[i]],
+                        mar_models[[cue]]$models[[1]]$model[[1]])
+      kl_dqu <- KL_mods(dia_models[[cue]]$models[[2]]$model[[i]],
+                        mar_models[[cue]]$models[[2]]$model[[1]])
+
+      dia_kl_dec[[dialect]] <- kl_dec
+      dia_kl_dqu[[dialect]] <- kl_dqu
+
+      dia_kl <- (kl_dec + kl_dqu) / 2
+      dia_kl_all[[dialect]] <- dia_kl
+    }
+
+    avg_kl_dec_dia <- mean(unlist(dia_kl_dec))
+    avg_kl_dqu_dia <- mean(unlist(dia_kl_dqu))
+    avg_kl_all_dia <- mean(unlist(dia_kl_all))
+
+    
+    kl_perm_all <- numeric(n_permutations)
+    kl_perm_dec <- numeric(n_permutations)
+    kl_perm_dqu <- numeric(n_permutations)
+    
+    perm_data_dec <- dia_models[[cue]]$data[[1]]
+    perm_data_dqu <- dia_models[[cue]]$data[[2]]
+    
+    for (j in seq_len(n_permutations)) {
+      kl_perm_dec_j <- list()
+      kl_perm_dqu_j <- list()
+
+      perm_data_dec$dialect <- sample(perm_data_dec$dialect)
+      perm_data_dqu$dialect <- sample(perm_data_dqu$dialect)
+
+      permuted_model_dec <- fit_model_to_data(perm_data_dec)
+      permuted_model_dqu <- fit_model_to_data(perm_data_dqu)
+      
+      permuted_model_dec <- permuted_model_dec[order(match(permuted_model_dec$dialect,
+                                                     dia_models$cue$models[[1]]$dialect)), ]
+      
+      permuted_model_dqu <- permuted_model_dqu[order(match(permuted_model_dqu$dialect,
+                                                     dia_models$cue$models[[1]]$dialect)), ]
+
+      for (d in seq_along(dialects)) {
+        dialect <- dialects[d]
+        kl_perm_dec_j[[dialect]] <- KL_mods(permuted_model_dec$model[[d]],
+                                          mar_models[[cue]]$models[[1]]$model[[1]])
+        kl_perm_dqu_j[[dialect]] <- KL_mods(permuted_model_dqu$model[[d]],
+                                          mar_models[[cue]]$models[[2]]$model[[1]])
+      }
+      
+      kl_perm_dec[j] <- mean(unlist(kl_perm_dec_j))
+      kl_perm_dqu[j] <- mean(unlist(kl_perm_dqu_j))
+      kl_perm_all[j] <- (mean(unlist(kl_perm_dec_j)) + mean(unlist(kl_perm_dqu_j))) / 2
+
+
+      print(paste("Permutation", j, "out of", n_permutations, ", cue", cue))
+    }
+
+    p_value_dec <- sum(unlist(kl_perm_dec) >= avg_kl_dec_dia) / n_permutations
+    dia_p_values[["dec"]] <- p_value_dec
+
+    p_value_dqu <- sum(unlist(kl_perm_dqu) >= avg_kl_dqu_dia) / n_permutations
+    dia_p_values[["dqu"]] <- p_value_dqu
+
+    p_value_all <- sum(kl_perm_all >= avg_kl_all_dia) / n_permutations
+    dia_p_values[["all"]] <- p_value_all
+
+    p_values[[cue]] <- dia_p_values
+    kl_values[[cue]] <- list(dec = avg_kl_dec_dia, dqu = avg_kl_dqu_dia, all = avg_kl_all_dia)
+  }
+
+  return(list(p_values = p_values, kl_values = kl_values))
+}
+
+dia.KL.average.IViE <- calculate_average_over_dia(utt.dia.models_list.IViE, utt.mar.models_list.IViE)
+dia.KL.average.SVBI <- calculate_average_over_dia(utt.dia.models_list.SVBI, utt.mar.models_list.SVBI)
+dia.KL.average.IViE
+dia.KL.average.SVBI
+
+save(dia.KL.average.IViE, dia.KL.average.SVBI, file = "dia_KL_average.RData")
+
+
+```
+# Table 9 and 10
+```{r}
+create_df_dia_average <- function(nested_list) {
+  # Define cues
+  cues <- c("final_F0", "fin_IntNormalization", "fin_Int_Ext_Normalization", "prenu_IntNormalization", "glodiff")
+
+  # Empty list to store the data frames
+  df_list <- list()
+
+  # Iterate over cues
+  for (cue in cues) {
+    # Extract values
+    p_values <- nested_list$p_values[[cue]]
+    kl_values <- nested_list$kl_values[[cue]]
+
+    # Create data frame
+    df <- data.frame(
+      cue = cue,
+      dec_p_value = p_values$dec,
+      dec_kl_value = kl_values$dec,
+      dqu_p_value = p_values$dqu,
+      dqu_kl_value = kl_values$dqu,
+      all_p_value = p_values$all,
+      all_kl_value = kl_values$all
+    )
+
+    # Append to list
+    df_list[[cue]] <- df
+  }
+
+  return(df_list)
+}
+
+dia.average.tables.IViE <- create_df_dia_average(dia.KL.average.IViE)
+dia.average.tables.SVBI <- create_df_dia_average(dia.KL.average.SVBI)
+
+dia.average.tables.IViE <- do.call(rbind, dia.average.tables.IViE)
+dia.average.tables.SVBI <- do.call(rbind, dia.average.tables.SVBI)
+
+rownames(dia.average.tables.IViE) <- NULL
+rownames(dia.average.tables.SVBI) <- NULL
+
+
+dia.average.tables.IViE
+dia.average.tables.SVBI
+```
+
+# by dialect
+```{r}
+fit_model_to_data <- function(data) {
+  train_models(data, grouping = "dialect", cues = "cue_value", add_groups = TRUE)
+}
+
+calculate_average_over_each_dia <- function(dia_models, mar_models, n_permutations = 1000) {
+  set.seed(123)
+  p_values <- list()
+  kl_values <- list()  
+
+  for (cue in names(dia_models)) {
+    dialects <- dia_models[[cue]]$models[[1]]$dialect
+    kl_values[[cue]] <- list()
+
+    for (i in seq_along(dialects)) {
+      dialect <- dialects[i]
+      
+      kl_dec <- KL_mods(dia_models[[cue]]$models[[1]]$model[[i]],
+                        mar_models[[cue]]$models[[1]]$model[[1]])
+      kl_dqu <- KL_mods(dia_models[[cue]]$models[[2]]$model[[i]],
+                        mar_models[[cue]]$models[[2]]$model[[1]])
+
+      kl_dialect <- (kl_dec + kl_dqu) / 2
+      kl_values[[cue]][[dialect]] <- kl_dialect
+      
+      perm_data_dec <- dia_models[[cue]]$data[[1]]
+      perm_data_dqu <- dia_models[[cue]]$data[[2]]
+      kl_perm <- numeric(n_permutations)
+      
+      for (j in seq_len(n_permutations)) {
+        perm_data_dec$dialect <- sample(perm_data_dec$dialect)
+        perm_data_dqu$dialect <- sample(perm_data_dqu$dialect)
+        
+        permuted_model_dec <- fit_model_to_data(perm_data_dec)
+        permuted_model_dqu <- fit_model_to_data(perm_data_dqu)
+        
+        permuted_model_dec <- permuted_model_dec[order(match(permuted_model_dec$dialect,
+                                                     dia_models$cue$models[[1]]$dialect)), ]
+      
+        permuted_model_dqu <- permuted_model_dqu[order(match(permuted_model_dqu$dialect,
+                                                     dia_models$cue$models[[1]]$dialect)), ]
+        
+        kl_perm_dec <- KL_mods(permuted_model_dec$model[[i]],
+                               mar_models[[cue]]$models[[1]]$model[[1]])
+        kl_perm_dqu <- KL_mods(permuted_model_dqu$model[[i]],
+                               mar_models[[cue]]$models[[2]]$model[[1]])
+        
+        kl_perm[j] <- (kl_perm_dec + kl_perm_dqu) / 2
+        
+        cat("Done with permutation ", j, " for dialect ", dialect, " for cue ", cue, "\n")
+        
+      }
+      
+      p_value <- sum(kl_perm >= kl_dialect) / n_permutations
+      p_values[[cue]][[dialect]] <- p_value
+    }
+  }
+
+  return(list(p_values = p_values, kl_values = kl_values))
+}
+
+dia.KL.average.each.IViE <- calculate_average_over_each_dia(utt.dia.models_list.IViE, utt.mar.models_list.IViE)
+dia.KL.average.each.SVBI <- calculate_average_over_each_dia(utt.dia.models_list.SVBI, utt.mar.models_list.SVBI)
+
+dia.KL.average.each.IViE
+dia.KL.average.each.SVBI
+
+save(dia.KL.average.each.IViE, dia.KL.average.each.SVBI, file = "dia_KL_average_each.RData")
+```
+
+# Table 11 and 12
+```{r}
+dia.each.function.IViE <- function(nested_list) {
+  # Define cues
+  cues <- c("final_F0", "fin_IntNormalization", "fin_Int_Ext_Normalization", "prenu_IntNormalization", "glodiff")
+
+  # Define dialects and their corresponding keys in the list
+  dialects <- c("Belfast", "Cambridge", "Dublin", "London", "Leeds", "Newcastle", "Bradford", "Liverpool", "Cardiff")
+  dialect_keys <- c("b", "c", "d", "j", "l", "n", "p", "s", "w")
+
+  # Empty list to store the data frames
+  df_list <- list()
+
+  # Iterate over cues
+  for (cue in cues) {
+    # Empty vectors to store the values
+    p_values_vec <- c()
+    kl_values_vec <- c()
+
+    # Iterate over dialects
+    for (i in seq_along(dialects)) {
+      # Extract values
+      p_values_vec <- c(p_values_vec, nested_list$p_values[[cue]][[dialect_keys[i]]])
+      kl_values_vec <- c(kl_values_vec, nested_list$kl_values[[cue]][[dialect_keys[i]]])
+    }
+
+    # Create data frame
+    df <- data.frame(
+      cue = cue,
+      dialect = dialects,
+      p_value = p_values_vec,
+      kl_value = kl_values_vec
+    )
+
+    # Append to list
+    df_list[[cue]] <- df
+  }
+
+  return(df_list)
+}
+
+dia.each.tables.IViE <- dia.each.function.IViE(dia.KL.average.each.IViE)
+dia.each.tables.IViE
+
+dia.each.function.SVBI <- function(nested_list) {
+  # Define cues
+  cues <- c("final_F0", "fin_IntNormalization", "fin_Int_Ext_Normalization", "prenu_IntNormalization", "glodiff")
+
+  # Define dialects and their corresponding keys in the list
+  dialects <- c("Belfast", "Cambridge", "Newcastle")
+  dialect_keys <- c("BEL", "CAM", "NEW")
+
+  # Empty list to store the data frames
+  df_list <- list()
+
+  # Iterate over cues
+  for (cue in cues) {
+    # Empty vectors to store the values
+    p_values_vec <- c()
+    kl_values_vec <- c()
+
+    # Iterate over dialects
+    for (i in seq_along(dialects)) {
+      # Extract values
+      p_values_vec <- c(p_values_vec, nested_list$p_values[[cue]][[dialect_keys[i]]])
+      kl_values_vec <- c(kl_values_vec, nested_list$kl_values[[cue]][[dialect_keys[i]]])
+    }
+
+    # Create data frame
+    df <- data.frame(
+      cue = cue,
+      dialect = dialects,
+      p_value = p_values_vec,
+      kl_value = kl_values_vec
+    )
+
+    # Append to list
+    df_list[[cue]] <- df
+  }
+
+  return(df_list)
+}
+
+dia.each.tables.SVBI <- dia.each.function.SVBI(dia.KL.average.each.SVBI)
+dia.each.tables.SVBI
+
+```
+
+## IViE/SVBI: Dialect + Gender
+```{r}
+fit_model_to_data <- function(data) {
+  train_models(data, grouping = c("dialect"), cues = "cue_value", add_groups = TRUE)
+}
+
+calculate_permutation_pvalue_gen_dia <- function(gen_dia_models, mar_models,
+                                                 n_permutations = 1000) {
+  set.seed(123)  
+  p_values <- list()
+  kl_values <- list()  # For storing real KL values
+
+  # dia+gen model lists have four rows, so they have to be mapped onto the mar.model list.
+  model_mapping <- c(1, 2, 1, 2)
+
+  for (cue in names(gen_dia_models)) {
+    cue_p_values <- list()
+    cue_kl_values <- list() 
+
+    for (i in seq_len(length(gen_dia_models[[cue]]$models))) {
+      mar_model_idx <- model_mapping[i]
+
+      # Calculate real KL divergence
+      kl <- vector(length = length(gen_dia_models[[cue]]$models[[i]]$model))
+      for (d in seq_len(length(gen_dia_models[[cue]]$models[[i]]$model))) {
+        kl[d] <- KL_mods(gen_dia_models[[cue]]$models[[i]]$model[[d]],
+                         mar_models[[cue]]$models[[mar_model_idx]]$model[[1]])
+      }
+
+      cue_kl_values[[i]] <- kl
+
+      # Permutation
+      kl_perm <- matrix(numeric(n_permutations *length(gen_dia_models[[cue]]$models[[i]]$model)),
+                        nrow=n_permutations)
+
+      for (j in seq_len(n_permutations)) {
+        permuted_data <- gen_dia_models[[cue]]$data[[i]]
+        # Shuffle 'dialect' labels for all data points
+        permuted_data$dialect <- sample(permuted_data$dialect)
+        permuted_model <- fit_model_to_data(permuted_data)
+        permuted_model <- permuted_model[order(match(permuted_model$dialect, gen_dia_models$cue$models[[1]]$dialect)), ]
+
+        for (d in seq_len(length(gen_dia_models[[cue]]$models[[i]]$model))) {
+          kl_perm[j, d] <- KL_mods(permuted_model$model[[d]],
+                                   mar_models[[cue]]$models[[mar_model_idx]]$model[[1]])
+        }
+        
+        print(paste("Permutation", j, "out of", n_permutations,
+                    "completed for cue", cue, ", model", i))
+      }
+
+      p_value <- colSums(kl_perm >= kl) / n_permutations
+      cue_p_values[[i]] <- p_value
+    }
+
+    p_values[[cue]] <- cue_p_values
+    kl_values[[cue]] <- cue_kl_values
+  }
+
+  return(list(p_values = p_values, kl_values = kl_values))
+}
+
+gen.dia.KL.IViE <- calculate_permutation_pvalue_gen_dia(utt.gen.dia.models_list.IViE,
+                                                        utt.mar.models_list.IViE)
+gen.dia.KL.SVBI <- calculate_permutation_pvalue_gen_dia(utt.gen.dia.models_list.SVBI,
+                                                        utt.mar.models_list.SVBI)
+
+gen.dia.KL.IViE
+gen.dia.KL.SVBI
+
+save(gen.dia.KL.IViE, gen.dia.KL.SVBI, file = "gen_dia_KL.RData")
+load("./gen_dia_KL.RData")
+
+```
+
+
+# by utterance type; all
+```{r warning=FALSE}
+fit_model_to_data <- function(data) {
+  train_models(data, grouping = c("dialect"), cues = "cue_value", add_groups = TRUE)
+}
+
+calculate_average_permutation_pvalue_gen_dia <- function(gen_dia_models, mar_models, n_permutations = 1000) {
+  set.seed(123)  
+  results <- list()
+  kl_values <- list()  # For storing real KL values
+
+  # dia+gen model lists have four rows, so they have to be mapped onto the mar.model list.
+  model_mapping <- c(1, 2, 1, 2)
+
+  for (cue in names(gen_dia_models)) {
+    cue_p_values <- list()
+    cue_kl_values <- list() 
+
+    for (i in seq_len(length(gen_dia_models[[cue]]$models))) {
+      mar_model_idx <- model_mapping[i]
+
+      # Calculate real KL divergence and mean KL divergence for each group
+      kl <- numeric(length(gen_dia_models[[cue]]$models[[i]]$model))
+      for (d in seq_len(length(gen_dia_models[[cue]]$models[[i]]$model))) {
+        kl[d] <- KL_mods(gen_dia_models[[cue]]$models[[i]]$model[[d]],
+                         mar_models[[cue]]$models[[mar_model_idx]]$model[[1]])
+      }
+
+      # Store the mean KL value for each model
+      cue_kl_values[[i]] <- mean(kl)
+    }
+
+    # Calculate averages over the subgroups
+    kl_values_avg <- c("dec" = mean(unlist(cue_kl_values[c(1,4)])), 
+                       "dqu" = mean(unlist(cue_kl_values[c(2,3)])), 
+                       "all" = mean(unlist(cue_kl_values)))
+
+    # Store the averaged KL values
+    kl_values[[cue]] <- kl_values_avg
+  
+    kl_perm <- list("dec" = numeric(n_permutations), 
+                    "dqu" = numeric(n_permutations), 
+                    "all" = numeric(n_permutations))
+
+    for (j in seq_len(n_permutations)) {
+      kl_permuted <- list("dec" = list(), "dqu" = list(), "all" = list())
+
+      for (i in seq_len(length(gen_dia_models[[cue]]$models))) {
+        permuted_data <- gen_dia_models[[cue]]$data[[i]]
+        permuted_data$dialect <- sample(permuted_data$dialect)
+        permuted_model <- fit_model_to_data(permuted_data)
+        permuted_model <- permuted_model[order(match(permuted_model$dialect, gen_dia_models$cue$models[[1]]$dialect)), ]
+
+        kl_i <- numeric(length = length(permuted_model$model))
+        for (d in seq_len(length(permuted_model$model))) {
+          kl_i[d] <- KL_mods(permuted_model$model[[d]],
+                                    mar_models[[cue]]$models[[model_mapping[i]]]$model[[1]])
+        }
+
+        if(i %in% c(1,3)) kl_permuted$dec[[i]] <- mean(kl_i)
+        if(i %in% c(2,4)) kl_permuted$dqu[[i]] <- mean(kl_i)
+        kl_permuted$all[[i]] <- mean(kl_i)
+      }
+
+      kl_perm["dec"][j] <- mean(unlist(kl_permuted$dec))
+      kl_perm["dqu"][j] <- mean(unlist(kl_permuted$dqu))
+      kl_perm["all"][j] <- mean(unlist(kl_permuted$all))
+      
+      cat("Permutation ", j, "for cue ", cue, " has ended.\n")
+    }
+
+    for (kl_ave in c("dec", "dqu", "all")) {
+      p_value <- sum(kl_perm[[kl_ave]] >= kl_values_avg[[kl_ave]]) / n_permutations
+      cue_p_values[[kl_ave]] <- p_value
+    }
+    
+    results[[cue]] <- list("kl_values" = kl_values_avg, "p_values" = cue_p_values)
+  }
+
+  return(results)
+}
+
+gen.dia.KL.average.IViE <- calculate_average_permutation_pvalue_gen_dia(utt.gen.dia.models_list.IViE,
+                                                                        utt.mar.models_list.IViE)
+gen.dia.KL.average.SVBI <- calculate_average_permutation_pvalue_gen_dia(utt.gen.dia.models_list.SVBI,
+                                                                        utt.mar.models_list.SVBI)
+
+gen.dia.KL.average.IViE
+gen.dia.KL.average.SVBI
+save(gen.dia.KL.average.IViE, gen.dia.KL.average.SVBI, file = "gen_dia_KL_average.RData")
+```
+
+#Table 13 and 14
+```{r}
+create_df_dia_average <- function(nested_list) {
+  # Define cues
+  cues <- c("final_F0", "fin_IntNormalization", "fin_Int_Ext_Normalization", "prenu_IntNormalization", "glodiff")
+
+  # Empty list to store the data frames
+  df_list <- list()
+
+  # Iterate over cues
+  for (cue in cues) {
+    # Extract values
+    p_values <- nested_list[[cue]]$p_values
+    kl_values <- unlist(nested_list[[cue]]$kl_values)
+
+    # Create data frame
+    df <- data.frame(
+      cue = cue,
+      dec_p_value = p_values$dec,
+      dec_kl_value = kl_values["dec"],
+      dqu_p_value = p_values$dqu,
+      dqu_kl_value = kl_values["dqu"],
+      all_p_value = p_values$all,
+      all_kl_value = kl_values["all"]
+    )
+
+    # Append to list
+    df_list[[cue]] <- df
+  }
+
+  return(df_list)
+}
+
+
+# Apply function
+gen.dia.KL.average.table.IViE <- create_df_dia_average(gen.dia.KL.average.IViE)
+gen.dia.KL.average.table.SVBI <- create_df_dia_average(gen.dia.KL.average.SVBI)
+
+
+gen.dia.KL.average.table.IViE <- do.call(rbind, gen.dia.KL.average.table.IViE)
+gen.dia.KL.average.table.SVBI <- do.call(rbind, gen.dia.KL.average.table.SVBI)
+
+rownames(gen.dia.KL.average.table.IViE) <- NULL
+rownames(gen.dia.KL.average.table.SVBI) <- NULL
+
+
+gen.dia.KL.average.table.IViE
+gen.dia.KL.average.table.SVBI
+```
+
+
+# by dialect  
+```{r}
+fit_model_to_data <- function(data) {
+  train_models(data, grouping = "dialect", cues = "cue_value", add_groups = TRUE)
+}
+
+calculate_average_over_each_dia <- function(dia_models, mar_models, n_permutations = 1000) {
+  set.seed(123)
+  p_values <- list()
+  kl_values <- list()  
+
+  for (cue in names(dia_models)) {
+    dialects <- dia_models[[cue]]$models[[1]]$dialect
+    kl_values[[cue]] <- list()
+
+    for (i in seq_along(dialects)) {
+      dialect <- dialects[i]
+      
+      kl_1 <- KL_mods(dia_models[[cue]]$models[[1]]$model[[i]],
+                        mar_models[[cue]]$models[[1]]$model[[1]])
+      kl_2 <- KL_mods(dia_models[[cue]]$models[[2]]$model[[i]],
+                        mar_models[[cue]]$models[[2]]$model[[1]])
+      kl_3 <- KL_mods(dia_models[[cue]]$models[[3]]$model[[i]],
+                        mar_models[[cue]]$models[[1]]$model[[1]])
+      kl_4 <- KL_mods(dia_models[[cue]]$models[[4]]$model[[i]],
+                        mar_models[[cue]]$models[[2]]$model[[1]])
+
+      kl_dialect <- (kl_1 + kl_2 + kl_3 + kl_4) / 4
+      kl_values[[cue]][[dialect]] <- kl_dialect
+      
+      perm_data_1 <- dia_models[[cue]]$data[[1]]
+      perm_data_2 <- dia_models[[cue]]$data[[2]]
+      perm_data_3 <- dia_models[[cue]]$data[[3]]
+      perm_data_4 <- dia_models[[cue]]$data[[4]]
+      kl_perm <- numeric(n_permutations)
+      
+      for (j in seq_len(n_permutations)) {
+        perm_data_1$dialect <- sample(perm_data_1$dialect)
+        perm_data_2$dialect <- sample(perm_data_2$dialect)
+        perm_data_3$dialect <- sample(perm_data_3$dialect)
+        perm_data_4$dialect <- sample(perm_data_4$dialect)
+        
+        permuted_model_1 <- fit_model_to_data(perm_data_1)
+        permuted_model_2 <- fit_model_to_data(perm_data_2)
+        permuted_model_3 <- fit_model_to_data(perm_data_3)
+        permuted_model_4 <- fit_model_to_data(perm_data_4)
+        
+        permuted_model_1 <- permuted_model_1[order(match(permuted_model_1$dialect,
+                                                     dia_models$cue$models[[1]]$dialect)), ]
+      
+        permuted_model_2 <- permuted_model_2[order(match(permuted_model_2$dialect,
+                                                     dia_models$cue$models[[1]]$dialect)), ]
+        
+        permuted_model_3 <- permuted_model_3[order(match(permuted_model_3$dialect,
+                                                     dia_models$cue$models[[1]]$dialect)), ]
+        
+        permuted_model_4 <- permuted_model_4[order(match(permuted_model_4$dialect,
+                                                     dia_models$cue$models[[1]]$dialect)), ]
+        
+        kl_perm_1 <- KL_mods(permuted_model_1$model[[i]],
+                               mar_models[[cue]]$models[[1]]$model[[1]])
+        kl_perm_2 <- KL_mods(permuted_model_2$model[[i]],
+                               mar_models[[cue]]$models[[2]]$model[[1]])
+        kl_perm_3 <- KL_mods(permuted_model_3$model[[i]],
+                               mar_models[[cue]]$models[[1]]$model[[1]])
+        kl_perm_4 <- KL_mods(permuted_model_4$model[[i]],
+                               mar_models[[cue]]$models[[2]]$model[[1]])
+        
+        kl_perm[j] <- (kl_perm_1 + kl_perm_2 + kl_perm_3 + kl_perm_4) / 4
+        
+        cat("Permutation ", j, " for dialect ", dialect, " in cue ", cue, " has ended.\n")
+      }
+      
+      p_value <- sum(kl_perm >= kl_dialect) / n_permutations
+      p_values[[cue]][[dialect]] <- p_value
+    }
+  }
+
+  return(list(p_values = p_values, kl_values = kl_values))
+}
+
+gen.dia.each.IViE <- calculate_average_over_each_dia(utt.gen.dia.models_list.IViE,
+                                                     utt.mar.models_list.IViE)
+gen.dia.each.SVBI <- calculate_average_over_each_dia(utt.gen.dia.models_list.SVBI,
+                                                     utt.mar.models_list.SVBI)
+gen.dia.each.IViE
+gen.dia.each.SVBI
+```
+
+# Table 15 and 16
+```{r}
+gen.dia.each.function.IViE <- function(nested_list) {
+  # Define cues
+  cues <- c("final_F0", "fin_IntNormalization", "fin_Int_Ext_Normalization", "prenu_IntNormalization", "glodiff")
+
+  # Define dialects and their corresponding keys in the list
+  dialects <- c("Belfast", "Cambridge", "Dublin", "London", "Leeds", "Newcastle", "Bradford", "Liverpool", "Cardiff")
+  dialect_keys <- c("b", "c", "d", "j", "l", "n", "p", "s", "w")
+
+  # Empty list to store the data frames
+  df_list <- list()
+
+  # Iterate over cues
+  for (cue in cues) {
+    # Empty vectors to store the values
+    p_values_vec <- c()
+    kl_values_vec <- c()
+
+    # Iterate over dialects
+    for (i in seq_along(dialects)) {
+      # Extract values
+      p_values_vec <- c(p_values_vec, nested_list$p_values[[cue]][[dialect_keys[i]]])
+      kl_values_vec <- c(kl_values_vec, nested_list$kl_values[[cue]][[dialect_keys[i]]])
+    }
+
+    # Create data frame
+    df <- data.frame(
+      cue = cue,
+      dialect = dialects,
+      p_value = p_values_vec,
+      kl_value = kl_values_vec
+    )
+
+    # Append to list
+    df_list[[cue]] <- df
+  }
+
+  return(df_list)
+}
+
+gen.dia.each.tables.IViE <- gen.dia.each.function.IViE(gen.dia.each.IViE)
+gen.dia.each.tables.IViE
+
+gen.dia.each.function.SVBI <- function(nested_list) {
+  # Define cues
+  cues <- c("final_F0", "fin_IntNormalization", "fin_Int_Ext_Normalization", "prenu_IntNormalization", "glodiff")
+
+  # Define dialects and their corresponding keys in the list
+  dialects <- c("Belfast", "Cambridge", "Newcastle")
+  dialect_keys <- c("BEL", "CAM", "NEW")
+
+  # Empty list to store the data frames
+  df_list <- list()
+
+  # Iterate over cues
+  for (cue in cues) {
+    # Empty vectors to store the values
+    p_values_vec <- c()
+    kl_values_vec <- c()
+
+    # Iterate over dialects
+    for (i in seq_along(dialects)) {
+      # Extract values
+      p_values_vec <- c(p_values_vec, nested_list$p_values[[cue]][[dialect_keys[i]]])
+      kl_values_vec <- c(kl_values_vec, nested_list$kl_values[[cue]][[dialect_keys[i]]])
+    }
+
+    # Create data frame
+    df <- data.frame(
+      cue = cue,
+      dialect = dialects,
+      p_value = p_values_vec,
+      kl_value = kl_values_vec
+    )
+
+    # Append to list
+    df_list[[cue]] <- df
+  }
+
+  return(df_list)
+}
+
+gen.dia.each.tables.SVBI <- gen.dia.each.function.SVBI(gen.dia.each.SVBI)
+gen.dia.each.tables.SVBI
+```
+
+# SVBI: Talker: utterance_type and all only
+```{r}
+fit_model_to_data <- function(data) {
+  train_models(data, grouping = c("talker"), cues = "cue_value", add_groups = TRUE)
+}
+
+calculate_average_over_talker <- function(talker_models, mar_models, n_permutations = 1000) {
+  set.seed(123)
+  p_values <- list()
+  kl_values <- list()
+
+  for (cue in names(talker_models)) {
+    kl_list_dec <- list()
+    kl_list_dqu <- list()
+    kl_list_all <- list()
+
+    kl_perm_dec_list <- list()
+    kl_perm_dqu_list <- list()
+    kl_perm_all_list <- list()
+
+    for (i in seq_len(length(talker_models[[cue]]$models))) {
+      for (j in seq_len(length(talker_models[[cue]]$models[[i]]$model))) {
+        kl <- KL_mods(talker_models[[cue]]$models[[i]]$model[[j]],
+                      mar_models[[cue]]$models[[i]]$model[[1]])
+
+        kl_list_all[[length(kl_list_all) + 1]] <- kl
+
+        if(i == 1) {
+          kl_list_dec[[j]] <- kl
+        } else {
+          kl_list_dqu[[j]] <- kl
+        }
+      }
+    }
+
+    kl_values[[cue]] <- list(dec = mean(unlist(kl_list_dec)),
+                             dqu = mean(unlist(kl_list_dqu)),
+                             all = mean(unlist(kl_list_all)))
+
+    for (j in seq_len(n_permutations)) {
+      kl_perm_dec <- numeric(length(talker_models[[cue]]$models[[1]]$model))
+      kl_perm_dqu <- numeric(length(talker_models[[cue]]$models[[2]]$model))
+      kl_perm_all <- numeric(length(kl_list_all))
+
+      for (i in seq_len(length(talker_models[[cue]]$models))) {
+        permuted_data <- talker_models[[cue]]$data[[i]]
+        permuted_data$talker <- sample(permuted_data$talker)
+
+        permuted_model <- fit_model_to_data(permuted_data)
+        permuted_model <- permuted_model[order(match(permuted_model$talker, talker_models$cue$models[[1]]$talker)), ]
+
+        for (k in seq_len(length(permuted_model$model))) {
+          kl_perm <- KL_mods(permuted_model$model[[k]],
+                             mar_models[[cue]]$models[[i]]$model[[1]])
+
+          kl_perm_all[(i-1)*length(permuted_model$model) + k] <- kl_perm
+
+          if(i == 1) {
+            kl_perm_dec[k] <- kl_perm
+          } else {
+            kl_perm_dqu[k] <- kl_perm
+          }
+        }
+      }
+
+      kl_perm_dec_list[[j]] <- mean(kl_perm_dec)
+      kl_perm_dqu_list[[j]] <- mean(kl_perm_dqu)
+      kl_perm_all_list[[j]] <- mean(kl_perm_all)
+    }
+
+    p_values[[cue]] <- list(dec = mean(unlist(kl_perm_dec_list) >= kl_values[[cue]]$dec),
+                            dqu = mean(unlist(kl_perm_dqu_list) >= kl_values[[cue]]$dqu),
+                            all = mean(unlist(kl_perm_all_list) >= kl_values[[cue]]$all))
+  }
+
+  return(list(p_values = p_values, kl_values = kl_values))
+}
+
+
+tal.KL.average.SVBI <- calculate_average_over_talker (utt.tal.models_list.SVBI,
+                                                      utt.mar.models_list.SVBI)
+tal.KL.average.SVBI
+
+```
+
+# Table 17
+```{r}
+# Define the groups
+groups <- c("dec", "dqu", "all")
+
+# Define a function to create a data frame from the p_values and kl_values for a specific cue
+create_df <- function(cue) {
+  data.frame(
+    Group = groups,
+    p_values = unlist(tal.KL.average.SVBI$p_values[[cue]]),
+    kl_values = unlist(tal.KL.average.SVBI$kl_values[[cue]]) 
+  )
+}
+
+# Now use lapply to apply this function to each cue and create a named list of data frames
+tal.KL.average.SVBI.table <- setNames(lapply(cues, create_df), cues)
+for (i in seq_along(tal.KL.average.SVBI.table)) {
+  print(knitr::kable(tal.KL.average.SVBI.table[[i]], caption = captions[i], digits = 3, row.names = FALSE))
+}
+```
+
+### Step 4: Utility
+# Classifier: function
+```{r Classifer used in Xie et al., (2021)}
+
+split_num = 5 #specify the number of proportion the data will be split into. When split_num = 5, train_test_split will take 1 of the 5 for testing, and the other 4 for training. The entire procedure will be done five times, such that all proportions will be tested without being used in training.
+
+
+model_lhood <- function(mod, dat, ...) {
+  dnorm(dat, mean = mod$mu, ...)
+}
+
+nest <- nest_legacy
+unnest <- unnest_legacy
+
+add_id_col = function(x) mutate(x, id_=row_number())
+
+classify = function (data, 
+    models, category) 
+{
+    assert_that(is.data.frame(models))  
+    assert_that(category %in% names(models))
+    assert_that(is.data.frame(data))
+    model_groups <- groups(models)
+    if (length(model_groups) == 0) {
+        data <- data %>% ungroup()
+    }
+    else {
+        data <- data %>% group_by(.dots = model_groups)
+    }
+    model_lists <- models %>% do(models = list_models(., category))
+    if (length(model_groups) == 0) {
+        data_and_models <- bind_cols(data_frame(data = list(data)), 
+            model_lists)
+    }
+    else {
+        data_and_models <- data %>% nest_legacy() %>% left_join(model_lists)
+    }
+    data_and_models %>% mutate(lhoods = purrr::map2(data, models, ~apply_model_list(.x, 
+        .y, model_lhood)),
+        posteriors = purrr::map(lhoods,
+                            . %>%
+                              add_id_col() %>%
+                              gather(model, lhood, -id_) %>%
+             group_by(id_) %>%
+             mutate(posterior = lhood / sum(lhood),
+                                     posterior_choice = posterior==max(posterior)))
+           ) %>%  ### here the category with maximal posterior is chosen
+        unnest_legacy(map2(data, posteriors, ~inner_join(.x %>% add_id_col(),
+            .y, by = "id_") %>% dplyr::select(-id_))) %>% group_by(.dots = model_groups)
+}
+
+```
+
+# Get_accuracy: function
+```{r import get_accuracy function from the phondisttool package}
+get_accuracy <- function(tbl, category_col, method='choice') {
+  assert_that(method %in% c('choice', 'posterior'))
+  assert_that(has_name(tbl, category_col))
+  
+  category_eq_mod <- lazyeval::interp(~var==model,
+                                      var=as.name(category_col))
+  
+  if (method == 'choice') {
+    tbl %>%
+      filter(posterior_choice) %>%
+      mutate_(accuracy = category_eq_mod)
+  } else if (method == 'posterior') {
+    tbl %>%
+      filter_(category_eq_mod) %>%
+      mutate_(accuracy = ~ posterior)
+  }
+  
+}
+
+```
+
+# TrainTestSplit: function
+```{r}
+train_test_split <- function(d, holdout, groups=NULL) {
+
+  d %>%
+    group_by_(holdout) %>%
+    summarise() %>%
+    purrrlyr::by_row(~ anti_join(d, ., by=holdout) %>%
+                       group_by_(.dots=groups),
+                     .to = 'data_train') %>%
+    inner_join(d %>%
+                 group_by_(holdout, .dots=groups) %>%
+                 nest(.key='data_test'),
+               by = holdout)
+
+}
+```
+
+
+## Utility: Gender
+```{r}
+
+generate_temp_iviE <- function(dataset) {
+  temp_gen <- dataset %>%
+    group_by(cue_type, utterance_type, gender) %>%
+    nest() %>% 
+    mutate(data = map(data, ~.x %>%
+                       mutate(split = ntile(runif(nrow(.)), 5))))
+  
+  return(temp_gen)
+}
+
+temp.gen.IViE <- generate_temp_iviE(IViE_long)
+temp.gen.SVBI <- generate_temp_iviE(SVBI_long)
+
+gender_classification_results <- function(temp_gen) {
+  gen_class <- temp_gen %>%
+    unnest(data) %>%
+    group_by(cue_type) %>% 
+    nest() %>% 
+    mutate(
+      gen.results = map(data, ~ .x %>%
+        group_by(gender, utterance_type) %>%
+        droplevels(.) %>%
+        train_test_split(holdout='split') %>%
+        mutate(
+          models_trained = map(data_train,
+            ~ .x %>%
+              group_by(gender) %>% 
+              train_models(grouping = "utterance_type", cues = "cue_value", add_groups = TRUE)),
+          models_tested = map2(data_test, models_trained, classify, category = "utterance_type"))
+        )
+      )
+
+  return(gen_class)
+}
+
+gen.class.IViE <- gender_classification_results(temp.gen.IViE)
+gen.class.SVBI <- gender_classification_results(temp.gen.SVBI)
+
+gen.class.IViE
+gen.class.SVBI
+#this contains all the resulting model_tests, but it does not contain the utility scores. For that, see below.
+```
+
+
+# Bootstrapping: gender
+```{r}
+# Bootstrapping for gender utility (without subgroups, for sub-groups, see the following chunk)
+bootstrap_analysis <- function(gen_class) {
+  num_bootstrap <- 1000
+  util_bootstraps <- matrix(0, nrow = num_bootstrap, ncol = 5)
+  cue_names <- gen_class$cue_type
+  
+  for (bootstrap_index in 1:num_bootstrap) {
+    bootstrap_util_list <- vector("numeric", length = 5)
+  
+    for (cue_index in 1:5) {
+      suppressWarnings({
+        cue_results <- gen_class$gen.results[[cue_index]]
+        cue_name <- cue_names[[cue_index]]
+  
+        cue_merged_results <- data.frame()
+  
+        for (split_index in 1:5) {
+          split_results <- cue_results$models_tested[[split_index]]
+          split_merged_results <- bind_rows(split_results)
+          cue_merged_results <- bind_rows(cue_merged_results, split_merged_results)
+        }
+  
+        cue_merged_results <- cue_merged_results %>%
+          filter(!is.na(posterior) & !is.nan(posterior) & utterance_type == model)
+  
+        # Perform bootstrapping by sampling with replacement
+        bootstrap_indices <- sample(nrow(cue_merged_results), replace = TRUE)
+        bootstrap_data <- cue_merged_results[bootstrap_indices, ]
+  
+        cue_accuracy <- get_accuracy(bootstrap_data, "utterance_type", "posterior")
+        acc <- cue_accuracy$accuracy
+        p <- mean(acc)
+        util <- log(p / (1 - p)) - log(1 / 1)
+  
+        bootstrap_util_list[cue_index] <- util
+      })
+    }
+  
+    util_bootstraps[bootstrap_index, ] <- bootstrap_util_list
+    # Print completion of each iteration
+    cat("Iteration", bootstrap_index, "of bootstrapping is done.\n")
+  }
+  
+  # Calculate the 95% confidence interval and p-value for each cue
+  lower_ci <- apply(util_bootstraps, 2, function(x) quantile(x, 0.025))
+  upper_ci <- apply(util_bootstraps, 2, function(x) quantile(x, 0.975))
+  p_values <- colMeans(util_bootstraps <= 0)
+  
+  gen.util <- list()
+  
+  # Calculate the utility and confidence intervals for each cue
+  for (cue_index in 1:5) {
+    cue_name <- cue_names[[cue_index]]
+  
+    # Store the results in a list
+    cue_results <- list(
+      Cue = cue_name,
+      Utility = mean(util_bootstraps[, cue_index]),
+      CI_Lower = lower_ci[cue_index],
+      CI_Upper = upper_ci[cue_index],
+      p_value = p_values[cue_index]
+    )
+    
+    # Add the cue results to the gen.util
+    gen.util[[cue_index]] <- cue_results
+  }
+  
+  return(gen.util)
+}
+
+gen_util_IViE <- bootstrap_analysis(gen.class.IViE)
+gen_util_SVBI <- bootstrap_analysis(gen.class.SVBI)
+
+# Save the gen.util to an RData file
+save(gen_util_IViE, gen_util_SVBI, file = "gen_util.RData")
+load("gen_util.RData")
+
+gen_util_IViE
+gen_util_SVBI
+```
+
+# Table 18 and 19
+```{r}
+# Function to convert nested list to data frame
+gen_util_table <- function(nested_list) {
+  df <- do.call(rbind, lapply(nested_list, function(x) {
+    data.frame(
+      Cue = x$Cue,
+      Utility = round(x$Utility, 2),
+      CI_Lower = round(x$CI_Lower, 2),
+      CI_Upper = round(x$CI_Upper, 2),
+      p_value = round(x$p_value, 2)
+      
+    )
+  }))
+  
+  return(df)
+}
+
+gen_util_IViE_table <- gen_util_table(gen_util_IViE)
+gen_util_SVBI_table <- gen_util_table(gen_util_SVBI)
+
+gen_util_IViE_table
+gen_util_SVBI_table
+```
+
+# Bootstrapping: female/male;dec/dqu
+```{r}
+gen.utt.util <- function(gen_class) {
+  suppressWarnings({
+  num_bootstrap <- 1000
+  cue_names <- gen_class$cue_type
+  
+  categories <- list(utterance_type = c("dec", "dqu"), gender = c("m", "f"))
+  
+  gen.util <- list()
+  
+  for (cue_index in 1:5) {
+    cue_results <- gen_class$gen.results[[cue_index]]
+    cue_name <- cue_names[[cue_index]]
+    cue_merged_results <- data.frame()
+  
+    for (split_index in 1:5) {
+      split_results <- cue_results$models_tested[[split_index]]
+      split_merged_results <- bind_rows(split_results)
+      cue_merged_results <- bind_rows(cue_merged_results, split_merged_results)
+    }
+  
+    cue_merged_results <- cue_merged_results %>%
+      filter(!is.na(posterior) & !is.nan(posterior) & utterance_type == model)
+  
+    for (category in names(categories)) {
+      for (value in categories[[category]]) {
+        filtered_data <- cue_merged_results %>%
+          filter_(paste(category, "==", shQuote(value)))
+          
+        util_bootstraps <- numeric(num_bootstrap)
+        
+        for (bootstrap_index in 1:num_bootstrap) {
+          bootstrap_indices <- sample(nrow(filtered_data), replace = TRUE)
+          bootstrap_data <- filtered_data[bootstrap_indices, ]
+          
+          cue_accuracy <- get_accuracy(bootstrap_data, "utterance_type", "posterior")
+          acc <- cue_accuracy$accuracy
+          p <- mean(acc)
+          util <- log(p / (1 - p)) - log(1 / 1)
+  
+          util_bootstraps[bootstrap_index] <- util
+          
+          cat("Iteration", bootstrap_index, "of bootstrapping for", cue_name, category, value, "is done.\n")
+        }
+        
+        lower_ci <- quantile(util_bootstraps, 0.025)
+        upper_ci <- quantile(util_bootstraps, 0.975)
+        p_value <- mean(util_bootstraps <= 0)
+  
+        gen.util[[paste(cue_name, category, value, sep = "_")]] <- list(
+          Cue = cue_name,
+          Category = value,
+          Utility = mean(util_bootstraps),
+          CI_Lower = lower_ci,
+          CI_Upper = upper_ci,
+          p_value = p_value
+        )
+      }
+    }
+  }
+  
+  return(gen.util)
+  })
+}
+
+gen.utt.util.IViE <- gen.utt.util(gen.class.IViE)
+gen.utt.util.SVBI <- gen.utt.util(gen.class.SVBI)
+
+# Save the results
+save(gen.utt.util.IViE, gen.utt.util.SVBI, file = "gen_utt_util.RData")
+gen.utt.util.IViE
+gen.utt.util.SVBI
+```
+#Table 20 and 21
+```{r}
+gen_utt_util_tables <- function(nested_list) {
+  
+  # Extract cue names
+  cue_names <- unique(sapply(nested_list, function(x) x$Cue))
+  
+  # Initialize a list to store each data frame
+  df_list <- list()
+  
+  # Loop through each cue name
+  for (cue_name in cue_names) {
+    
+    # Extract only those list elements that correspond to the current cue name
+    cue_list <- lapply(nested_list, function(x) {
+      if (x$Cue == cue_name) {
+        return(x)
+      } else {
+        return(NULL)
+      }
+    })
+    
+    # Remove NULL elements
+    cue_list <- cue_list[!sapply(cue_list, is.null)]
+    
+    # Create a data frame and add it to the list
+    df_list[[cue_name]] <- do.call(rbind, lapply(cue_list, function(x) {
+      data.frame(
+        Cue = x$Cue,
+        Category = x$Category,
+        Utility = round(x$Utility, 2),
+        CI_Lower = round(x$CI_Lower, 2),
+        CI_Upper = round(x$CI_Upper, 2),
+        p_value = round(x$p_value, 2),
+        row.names = NULL
+      )
+    }))
+  }
+  
+  return(df_list)
+}
+
+gen.utt.util.IViE.tables <- gen_utt_util_tables(gen.utt.util.IViE)
+gen.utt.util.SVBI.tables <- gen_utt_util_tables(gen.utt.util.SVBI)
+
+gen.utt.util.IViE.tables
+gen.utt.util.SVBI.tables
+```
+
+## Utility: Dialect
+```{r warning=FALSE}
+
+temp.dia <- function(data) {
+  data %>% 
+    group_by(cue_type, utterance_type, dialect) %>%
+    nest() %>% 
+    mutate(data = map(data, ~.x %>%
+                       mutate(split = ntile(runif(nrow(.)), 5))))
+}
+
+temp.dia.IViE <- temp.dia(IViE_long)
+temp.dia.SVBI <- temp.dia(SVBI_long)
+
+dia.class <- function(data_class) {
+  data_class %>%
+    unnest(data) %>%
+    group_by(cue_type) %>% 
+    nest() %>% 
+    mutate(
+      dia.results = map(data, ~ .x %>%
+          group_by(dialect, utterance_type) %>%
+          droplevels(.) %>%
+          train_test_split(holdout='split') %>%
+          mutate(
+            models_trained = map(data_train,
+                                 ~ .x %>%
+                                   group_by(dialect) %>% 
+                                   train_models(grouping = "utterance_type", cues = "cue_value", add_groups = TRUE)),
+            models_tested = map2(data_test, models_trained, 
+                                 classify, category = "utterance_type"))
+          )
+      )
+}
+
+dia.class.IViE <- dia.class(temp.dia.IViE)
+dia.class.SVBI <- dia.class(temp.dia.SVBI)
+
+dia.class.IViE
+dia.class.SVBI
+```
+
+# Bootstrapping: dialect
+```{r}
+
+dia_util <- function(dia_class) {
+  num_bootstrap <- 1000
+  util_bootstraps <- matrix(0, nrow = num_bootstrap, ncol = 5)
+  cue_names <- dia_class$cue_type
+  
+  for (bootstrap_index in 1:num_bootstrap) {
+    bootstrap_util_list <- vector("numeric", length = 5)
+  
+    for (cue_index in 1:5) {
+      suppressWarnings({
+        cue_results <- dia_class$dia.results[[cue_index]]
+        cue_name <- cue_names[[cue_index]]
+  
+        cue_merged_results <- data.frame()
+  
+        for (split_index in 1:5) {
+          split_results <- cue_results$models_tested[[split_index]]
+          split_merged_results <- bind_rows(split_results)
+          cue_merged_results <- bind_rows(cue_merged_results, split_merged_results)
+        }
+  
+        cue_merged_results <- cue_merged_results %>%
+          filter(!is.na(posterior) & !is.nan(posterior) & utterance_type == model)
+  
+        # Perform bootstrapping by sampling with replacement
+        bootstrap_indices <- sample(nrow(cue_merged_results), replace = TRUE)
+        bootstrap_data <- cue_merged_results[bootstrap_indices, ]
+  
+        cue_accuracy <- get_accuracy(bootstrap_data, "utterance_type", "posterior")
+        acc <- cue_accuracy$accuracy
+        p <- mean(acc)
+        util <- log(p / (1 - p)) - log(1 / 1)
+  
+        bootstrap_util_list[cue_index] <- util
+      })
+    }
+  
+    util_bootstraps[bootstrap_index, ] <- bootstrap_util_list
+    # Print completion of each iteration
+    cat("Iteration", bootstrap_index, "of bootstrapping is done.\n")
+  }
+  
+  # Calculate the 95% confidence interval and p-value for each cue
+  lower_ci <- apply(util_bootstraps, 2, function(x) quantile(x, 0.025))
+  upper_ci <- apply(util_bootstraps, 2, function(x) quantile(x, 0.975))
+  p_values <- colMeans(util_bootstraps <= 0)
+  
+  dia.util <- list()
+  
+  # Calculate the utility and confidence intervals for each cue
+  for (cue_index in 1:5) {
+    cue_name <- cue_names[[cue_index]]
+  
+    # Store the results in a list
+    cue_results <- list(
+      Cue = cue_name,
+      Utility = mean(util_bootstraps[, cue_index]),
+      CI_Lower = lower_ci[cue_index],
+      CI_Upper = upper_ci[cue_index],
+      p_value = p_values[cue_index]
+    )
+    
+    # Add the cue results to the dia.util
+    dia.util[[cue_index]] <- cue_results
+  }
+  
+  return(dia.util)
+}
+
+
+dia.util.IViE <- dia_util(dia.class.IViE)
+dia.util.SVBI <- dia_util(dia.class.SVBI)
+
+# Save the results to an RData file
+save(dia.util.IViE, dia.util.SVBI, file = "dia_util.RData")
+load("dia_util.RData")
+
+
+dia.util.IViE
+dia.util.SVBI
+```
+
+# Table 22 and 23
+```{r}
+# Function to convert nested list to data frame
+dia_util_table <- function(nested_list) {
+  df <- do.call(rbind, lapply(nested_list, function(x) {
+    data.frame(
+      Cue = x$Cue,
+      Utility = round(x$Utility, 2),
+      CI_Lower = round(x$CI_Lower, 2),
+      CI_Upper = round(x$CI_Upper, 2),
+      p_value = round(x$p_value, 2)
+      
+    )
+  }))
+  
+  return(df)
+}
+
+dia_util_IViE_table <- dia_util_table(dia.util.IViE)
+dia_util_SVBI_table <- dia_util_table(dia.util.SVBI)
+
+dia_util_IViE_table
+dia_util_SVBI_table
+```
+
+# Bootstrapping: dec/dqu
+```{r}
+dia_utt_util <- function(dia_class, num_bootstrap = 1000) {
+  util_bootstraps_dec <- matrix(0, nrow = num_bootstrap, ncol = 5)
+  util_bootstraps_dqu <- matrix(0, nrow = num_bootstrap, ncol = 5)
+  cue_names <- dia_class$cue_type
+  
+  for (bootstrap_index in 1:num_bootstrap) {
+    bootstrap_util_list_dec <- vector("numeric", length = 5)
+    bootstrap_util_list_dqu <- vector("numeric", length = 5)
+  
+    for (cue_index in 1:5) {
+      suppressWarnings({
+        cue_results <- dia_class$dia.results[[cue_index]]
+        cue_name <- cue_names[[cue_index]]
+  
+        cue_merged_results <- data.frame()
+  
+        for (split_index in 1:5) {
+          split_results <- cue_results$models_tested[[split_index]]
+          split_merged_results <- bind_rows(split_results)
+          cue_merged_results <- bind_rows(cue_merged_results, split_merged_results)
+        }
+  
+        cue_merged_results <- cue_merged_results %>%
+          filter(!is.na(posterior) & !is.nan(posterior) & utterance_type == model)
+  
+        cue_merged_results_dec <- cue_merged_results %>%
+          filter(utterance_type == "dec")
+  
+        cue_merged_results_dqu <- cue_merged_results %>%
+          filter(utterance_type == "dqu")
+  
+        bootstrap_indices_dec <- sample(nrow(cue_merged_results_dec), replace = TRUE)
+        bootstrap_data_dec <- cue_merged_results_dec[bootstrap_indices_dec, ]
+        cue_accuracy_dec <- get_accuracy(bootstrap_data_dec, "utterance_type", "posterior")
+        acc_dec <- cue_accuracy_dec$accuracy
+        util_dec <- log(mean(acc_dec) / (1 - mean(acc_dec))) - log(1 / 1)
+        bootstrap_util_list_dec[cue_index] <- util_dec
+  
+        bootstrap_indices_dqu <- sample(nrow(cue_merged_results_dqu), replace = TRUE)
+        bootstrap_data_dqu <- cue_merged_results_dqu[bootstrap_indices_dqu, ]
+        cue_accuracy_dqu <- get_accuracy(bootstrap_data_dqu, "utterance_type", "posterior")
+        acc_dqu <- cue_accuracy_dqu$accuracy
+        util_dqu <- log(mean(acc_dqu) / (1 - mean(acc_dqu))) - log(1 / 1)
+        bootstrap_util_list_dqu[cue_index] <- util_dqu
+      })
+    }
+  
+    util_bootstraps_dec[bootstrap_index, ] <- bootstrap_util_list_dec
+    util_bootstraps_dqu[bootstrap_index, ] <- bootstrap_util_list_dqu
+  
+    cat("Iteration", bootstrap_index, "of bootstrapping is done.\n")
+  }
+  
+  lower_ci_dec <- apply(util_bootstraps_dec, 2, function(x) quantile(x, 0.025))
+  upper_ci_dec <- apply(util_bootstraps_dec, 2, function(x) quantile(x, 0.975))
+  lower_ci_dqu <- apply(util_bootstraps_dqu, 2, function(x) quantile(x, 0.025))
+  upper_ci_dqu <- apply(util_bootstraps_dqu, 2, function(x) quantile(x, 0.975))
+  
+  p_values_dec <- colMeans(util_bootstraps_dec <= 0)
+  p_values_dqu <- colMeans(util_bootstraps_dqu <= 0)
+  
+  tables_list <- list()
+
+for (cue_index in 1:5) {
+  cue_name <- cue_names[[cue_index]]
+
+  results_table <- data.frame(
+    Cue = cue_name,
+    "Utility for utterance_type 'dec'" = mean(util_bootstraps_dec[, cue_index]),
+    "Lower CI for utterance_type 'dec'" = lower_ci_dec[cue_index],
+    "Upper CI for utterance_type 'dec'" = upper_ci_dec[cue_index],
+    "P-values for utterance_type 'dec'" = p_values_dec[cue_index],
+    "Utility for utterance_type 'dqu'" = mean(util_bootstraps_dqu[, cue_index]),
+    "Lower CI for utterance_type 'dqu'" = lower_ci_dqu[cue_index],
+    "Upper CI for utterance_type 'dqu'" = upper_ci_dqu[cue_index],
+    "P-values for utterance_type 'dqu'" = p_values_dqu[cue_index],
+    stringsAsFactors = FALSE
+  )
+
+  tables_list[[cue_name]] <- results_table
+}
+
+  return(tables_list)
+}
+
+
+dia.utt.util.IViE <- dia_utt_util(dia.class.IViE)
+dia.utt.util.SVBI <- dia_utt_util(dia.class.SVBI)
+dia.utt.util.IViE
+dia.utt.util.SVBI
+
+save(dia.utt.util.IViE, dia.utt.util.SVBI, file = "dia_utt_util.RData")
+
+```
+
+# Table 24 and 25
+```{r}
+
+convert_to_df <- function(util_list) {
+  converted_df <- do.call(rbind, util_list)
+  rownames(converted_df) <- NULL
+  return(converted_df)
+}
+
+dia_utt_util_IViE_tables <- convert_to_df(dia.utt.util.IViE)
+dia_utt_util_SVBI_tables <- convert_to_df(dia.utt.util.SVBI)
+
+dia_utt_util_IViE_tables
+dia_utt_util_SVBI_tables
+```
+
+# Bootstrapping: each dialect: IViE
+```{r}
+dia_utt_util_individual_dialects_IViE <- function(dia_class, num_bootstrap = 1000) {
+  cue_names <- dia_class$cue_type
+  dialects <- c("b", "c", "d", "j", "l", "n", "p", "s", "w")  # The provided dialect labels
+  
+  num_dialects <- length(dialects)
+  
+  # Initialize a three-dimensional array for the bootstraps
+  util_bootstraps <- array(0, dim = c(num_bootstrap, length(cue_names), num_dialects))
+  
+  for (bootstrap_index in 1:num_bootstrap) {
+    for (cue_index in 1:length(cue_names)) {
+      suppressWarnings({
+        cue_results <- dia_class$dia.results[[cue_index]]
+        cue_name <- cue_names[[cue_index]]
+  
+        cue_merged_results <- data.frame()
+  
+        for (split_index in 1:5) {
+          split_results <- cue_results$models_tested[[split_index]]
+          split_merged_results <- bind_rows(split_results)
+          cue_merged_results <- bind_rows(cue_merged_results, split_merged_results)
+        }
+  
+        cue_merged_results <- cue_merged_results %>%
+          filter(!is.na(posterior) & !is.nan(posterior) & utterance_type == model)
+        
+        for (dialect_index in 1:num_dialects) {
+          cue_merged_results_dialect <- cue_merged_results %>%
+            filter(dialect == dialects[dialect_index])
+          
+          # Perform bootstrapping by sampling with replacement
+          bootstrap_indices <- sample(nrow(cue_merged_results_dialect), replace = TRUE)
+          bootstrap_data <- cue_merged_results_dialect[bootstrap_indices, ]
+  
+          cue_accuracy <- get_accuracy(bootstrap_data, "utterance_type", "posterior")
+          acc <- cue_accuracy$accuracy
+          p <- mean(acc)
+          util <- log(p / (1 - p)) - log(1 / 1)
+  
+          util_bootstraps[bootstrap_index, cue_index, dialect_index] <- util
+        }
+      })
+    }
+    cat("Iteration", bootstrap_index, "of bootstrapping is done.\n")
+  }
+  
+  # Post processing to calculate confidence intervals and p-values
+  # for each cue and each dialect
+  util_summary <- list()
+  for (cue_index in 1:length(cue_names)) {
+    for (dialect_index in 1:num_dialects) {
+      bootstrap_values <- util_bootstraps[, cue_index, dialect_index]
+      lower_ci <- quantile(bootstrap_values, 0.025)
+      upper_ci <- quantile(bootstrap_values, 0.975)
+      p_value <- mean(bootstrap_values <= 0)
+      
+      util_summary[[paste(cue_names[cue_index], dialects[dialect_index], sep = "_")]] <- list(
+        Cue = cue_names[cue_index],
+        Dialect = dialects[dialect_index],
+        Utility = mean(bootstrap_values),
+        CI_Lower = lower_ci,
+        CI_Upper = upper_ci,
+        p_value = p_value
+      )
+    }
+  }
+  
+  return(util_summary)
+}
+
+
+dia.utt.util.each.IViE <- dia_utt_util_individual_dialects_IViE(dia.class.IViE)
+dia.utt.util.each.IViE
+
+```
+
+# Table 26 (NOT SORTED)
+```{r}
+
+```
+
+# Bootstrapping: each dialect: SVBI
+```{r}
+dia_utt_util_individual_dialects_SVBI <- function(dia_class, num_bootstrap = 1000) {
+  cue_names <- dia_class$cue_type
+  dialects <- c("BEL", "CAM", "NEW")  # The provided dialect labels for SVBI
+  
+  num_dialects <- length(dialects)
+  
+  # Initialize a three-dimensional array for the bootstraps
+  util_bootstraps <- array(0, dim = c(num_bootstrap, length(cue_names), num_dialects))
+  
+  for (bootstrap_index in 1:num_bootstrap) {
+    for (cue_index in 1:length(cue_names)) {
+      suppressWarnings({
+        cue_results <- dia_class$dia.results[[cue_index]]
+        cue_name <- cue_names[[cue_index]]
+  
+        cue_merged_results <- data.frame()
+  
+        for (split_index in 1:5) {
+          split_results <- cue_results$models_tested[[split_index]]
+          split_merged_results <- bind_rows(split_results)
+          cue_merged_results <- bind_rows(cue_merged_results, split_merged_results)
+        }
+  
+        cue_merged_results <- cue_merged_results %>%
+          filter(!is.na(posterior) & !is.nan(posterior) & utterance_type == model)
+        
+        for (dialect_index in 1:num_dialects) {
+          cue_merged_results_dialect <- cue_merged_results %>%
+            filter(dialect == dialects[dialect_index])
+          
+          # Perform bootstrapping by sampling with replacement
+          bootstrap_indices <- sample(nrow(cue_merged_results_dialect), replace = TRUE)
+          bootstrap_data <- cue_merged_results_dialect[bootstrap_indices, ]
+  
+          cue_accuracy <- get_accuracy(bootstrap_data, "utterance_type", "posterior")
+          acc <- cue_accuracy$accuracy
+          p <- mean(acc)
+          util <- log(p / (1 - p)) - log(1 / 1)
+  
+          util_bootstraps[bootstrap_index, cue_index, dialect_index] <- util
+        }
+      })
+    }
+    cat("Iteration", bootstrap_index, "of bootstrapping is done.\n")
+  }
+  
+  # Post processing to calculate confidence intervals and p-values
+  # for each cue and each dialect
+  util_summary <- list()
+  for (cue_index in 1:length(cue_names)) {
+    for (dialect_index in 1:num_dialects) {
+      bootstrap_values <- util_bootstraps[, cue_index, dialect_index]
+      lower_ci <- quantile(bootstrap_values, 0.025)
+      upper_ci <- quantile(bootstrap_values, 0.975)
+      p_value <- mean(bootstrap_values <= 0)
+      
+      util_summary[[paste(cue_names[cue_index], dialects[dialect_index], sep = "_")]] <- list(
+        Cue = cue_names[cue_index],
+        Dialect = dialects[dialect_index],
+        Utility = mean(bootstrap_values),
+        CI_Lower = lower_ci,
+        CI_Upper = upper_ci,
+        p_value = p_value
+      )
+    }
+  }
+  
+  return(util_summary)
+}
+
+dia.utt.util.each.SVBI <- dia_utt_util_individual_dialects_SVBI(dia.class.SVBI)
+dia.utt.util.each.SVBI
+
+
+# Save the results to an RData file
+save(dia.utt.util.each.IViE, dia.utt.util.each.SVBI, file = "dia_util_each.RData")
+
+```
+
+# Table 27 (NOT SORTED)
+```{r}
+
+```
+
+## Utility: Dialect+Gender
+```{r}
+temp.gen.dia <- function(df, n_splits = 5) {
+  df %>%
+    group_by(cue_type, utterance_type, dialect, gender) %>%
+    nest() %>%
+    mutate(data = map(data, ~.x %>%
+                       mutate(split = ntile(runif(nrow(.)), n_splits))))
+}
+
+temp.gen.dia.IViE <- temp.gen.dia(IViE_long)
+temp.gen.dia.SVBI <- temp.gen.dia(SVBI_long)
+
+gen.dia.class <- function(df, grouping = "utterance_type", cues = "cue_value", category = "utterance_type") {
+  df %>%
+    unnest(data) %>%
+    group_by(cue_type) %>% 
+    nest() %>% 
+    mutate(
+      gen_dia_results = map(data, ~ .x %>%
+                              group_by(dialect, gender, utterance_type) %>%
+                              droplevels(.) %>%
+                              train_test_split(holdout='split') %>%
+                              mutate(
+                                models_trained = map(data_train,
+                                                     ~ .x %>%
+                                                       group_by(dialect, gender) %>%
+                                                       train_models(grouping = grouping, cues = cues, add_groups = TRUE)),
+                                models_tested = map2(data_test, models_trained, classify, category = category))
+      )
+    )
+}
+
+gen.dia.class.IViE <- gen.dia.class(temp.gen.dia.IViE)
+gen.dia.class.SVBI <- gen.dia.class(temp.gen.dia.SVBI)
+
+```
+
+# Bootstrapping: dialect + gender
+```{r}
+gen_dia_util <- function(gen_dia_class, num_bootstrap = 1000) {
+  util_bootstraps <- matrix(0, nrow = num_bootstrap, ncol = 5)
+  cue_names <- gen_dia_class$cue_type
+
+  for (bootstrap_index in 1:num_bootstrap) {
+    bootstrap_util_list <- vector("numeric", length = 5)
+
+    for (cue_index in 1:5) {
+      suppressWarnings({
+        cue_results <- gen_dia_class$gen_dia_results[[cue_index]]
+        cue_name <- cue_names[[cue_index]]
+
+        cue_merged_results <- data.frame()
+
+        for (split_index in 1:5) {
+          split_results <- cue_results$models_tested[[split_index]]
+          split_merged_results <- bind_rows(split_results)
+          cue_merged_results <- bind_rows(cue_merged_results, split_merged_results)
+        }
+
+        cue_merged_results <- cue_merged_results %>%
+          filter(!is.na(posterior) & !is.nan(posterior) & utterance_type == model)
+
+        # Perform bootstrapping by sampling with replacement
+        bootstrap_indices <- sample(nrow(cue_merged_results), replace = TRUE)
+        bootstrap_data <- cue_merged_results[bootstrap_indices, ]
+
+        cue_accuracy <- get_accuracy(bootstrap_data, "utterance_type", "posterior")
+        acc <- cue_accuracy$accuracy
+        p <- mean(acc)
+        util <- log(p / (1 - p)) - log(1 / 1)
+
+        bootstrap_util_list[cue_index] <- util
+      })
+    }
+
+    util_bootstraps[bootstrap_index, ] <- bootstrap_util_list
+    
+    cat("Bootstrap iteration", bootstrap_index, "of", num_bootstrap, "completed.\n")
+  }
+
+  # Calculate the 95% confidence interval and p-value for each cue
+  lower_ci <- apply(util_bootstraps, 2, function(x) quantile(x, 0.025))
+  upper_ci <- apply(util_bootstraps, 2, function(x) quantile(x, 0.975))
+  p_values <- colMeans(util_bootstraps <= 0)
+
+  # Print the results for each cue
+  gen_dia_util_table <- data.frame()
+  for (cue_index in 1:5) {
+    cue_name <- cue_names[[cue_index]]
+    cue_util_bootstraps <- util_bootstraps[, cue_index]
+    cue_lower_ci <- lower_ci[cue_index]
+    cue_upper_ci <- upper_ci[cue_index]
+    cue_p_value <- p_values[cue_index]
+
+    gen_dia_util_table <- rbind(gen_dia_util_table, data.frame(
+      Cue = cue_name,
+      Utility = mean(cue_util_bootstraps),
+      Lower_CI = cue_lower_ci,
+      Upper_CI = cue_upper_ci,
+      p_value = cue_p_value
+    ))
+  }
+
+  return(gen_dia_util_table)
+}
+
+
+gen.dia.util.table.IViE <- gen_dia_util(gen.dia.class.IViE)
+gen.dia.util.table.SVBI <- gen_dia_util(gen.dia.class.SVBI)
+
+gen.dia.util.table.IViE
+gen.dia.util.table.SVBI
+
+# Save the results to an RData file
+save(gen.dia.util.table.IViE, gen.dia.util.table.SVBI, file = "gen_dia_util.RData")
+load("gen_dia_util.RData")
+```
+
+
+# Table 28 and 29
+```{r}
+gen.dia.util.table.IViE
+gen.dia.util.table.SVBI
+```
+
+# Bootstrapping: dec/dqu
+```{r}
+gen_dia_utt_util <- function(gen_dia_class, num_bootstrap = 1000) {
+  util_bootstraps_dec <- matrix(0, nrow = num_bootstrap, ncol = 5)
+  util_bootstraps_dqu <- matrix(0, nrow = num_bootstrap, ncol = 5)
+  cue_names <- gen_dia_class$cue_type
+  
+  for (bootstrap_index in 1:num_bootstrap) {
+    bootstrap_util_list_dec <- vector("numeric", length = 5)
+    bootstrap_util_list_dqu <- vector("numeric", length = 5)
+  
+    for (cue_index in 1:5) {
+      suppressWarnings({
+        cue_results <- gen_dia_class$gen_dia_results[[cue_index]]
+        cue_name <- cue_names[[cue_index]]
+  
+        cue_merged_results <- data.frame()
+  
+        for (split_index in 1:5) {
+          split_results <- cue_results$models_tested[[split_index]]
+          split_merged_results <- bind_rows(split_results)
+          cue_merged_results <- bind_rows(cue_merged_results, split_merged_results)
+        }
+  
+        cue_merged_results <- cue_merged_results %>%
+          filter(!is.na(posterior) & !is.nan(posterior) & utterance_type == model)
+  
+        cue_merged_results_dec <- cue_merged_results %>%
+          filter(utterance_type == "dec")
+  
+        cue_merged_results_dqu <- cue_merged_results %>%
+          filter(utterance_type == "dqu")
+  
+        bootstrap_indices_dec <- sample(nrow(cue_merged_results_dec), replace = TRUE)
+        bootstrap_data_dec <- cue_merged_results_dec[bootstrap_indices_dec, ]
+        cue_accuracy_dec <- get_accuracy(bootstrap_data_dec, "utterance_type", "posterior")
+        acc_dec <- cue_accuracy_dec$accuracy
+        util_dec <- log(mean(acc_dec) / (1 - mean(acc_dec))) - log(1 / 1)
+        bootstrap_util_list_dec[cue_index] <- util_dec
+  
+        bootstrap_indices_dqu <- sample(nrow(cue_merged_results_dqu), replace = TRUE)
+        bootstrap_data_dqu <- cue_merged_results_dqu[bootstrap_indices_dqu, ]
+        cue_accuracy_dqu <- get_accuracy(bootstrap_data_dqu, "utterance_type", "posterior")
+        acc_dqu <- cue_accuracy_dqu$accuracy
+        util_dqu <- log(mean(acc_dqu) / (1 - mean(acc_dqu))) - log(1 / 1)
+        bootstrap_util_list_dqu[cue_index] <- util_dqu
+      })
+    }
+  
+    util_bootstraps_dec[bootstrap_index, ] <- bootstrap_util_list_dec
+    util_bootstraps_dqu[bootstrap_index, ] <- bootstrap_util_list_dqu
+  
+    cat("Iteration", bootstrap_index, "of bootstrapping is done.\n")
+  }
+  
+  lower_ci_dec <- apply(util_bootstraps_dec, 2, function(x) quantile(x, 0.025))
+  upper_ci_dec <- apply(util_bootstraps_dec, 2, function(x) quantile(x, 0.975))
+  lower_ci_dqu <- apply(util_bootstraps_dqu, 2, function(x) quantile(x, 0.025))
+  upper_ci_dqu <- apply(util_bootstraps_dqu, 2, function(x) quantile(x, 0.975))
+  
+  p_values_dec <- colMeans(util_bootstraps_dec <= 0)
+  p_values_dqu <- colMeans(util_bootstraps_dqu <= 0)
+  
+  tables_list <- list()
+
+  for (cue_index in 1:5) {
+    cue_name <- cue_names[[cue_index]]
+
+    results_table <- data.frame(
+      Cue = cue_name,
+      "Utility for utterance_type 'dec'" = mean(util_bootstraps_dec[, cue_index]),
+      "Lower CI for utterance_type 'dec'" = lower_ci_dec[cue_index],
+      "Upper CI for utterance_type 'dec'" = upper_ci_dec[cue_index],
+      "P-values for utterance_type 'dec'" = p_values_dec[cue_index],
+      "Utility for utterance_type 'dqu'" = mean(util_bootstraps_dqu[, cue_index]),
+      "Lower CI for utterance_type 'dqu'" = lower_ci_dqu[cue_index],
+      "Upper CI for utterance_type 'dqu'" = upper_ci_dqu[cue_index],
+      "P-values for utterance_type 'dqu'" = p_values_dqu[cue_index],
+      stringsAsFactors = FALSE
+    )
+
+    tables_list[[cue_name]] <- results_table
+  }
+
+  return(tables_list)
+}
+
+gen.dia.utt.util.IViE <- gen_dia_utt_util(gen.dia.class.IViE)
+gen.dia.utt.util.SVBI <- gen_dia_utt_util(gen.dia.class.SVBI)
+
+gen.dia.utt.util.IViE
+gen.dia.utt.util.SVBI
+
+save(gen.dia.utt.util.IViE, gen.dia.utt.util.SVBI, file = "gen_dia_utt_util.RData")
+```
+# Table 30 and 31
+```{r}
+convert_to_df <- function(util_list) {
+  converted_df <- do.call(rbind, util_list)
+  rownames(converted_df) <- NULL
+  return(converted_df)
+}
+
+gen_dia_utt_util_IViE_tables <- convert_to_df(gen.dia.utt.util.IViE)
+gen_dia_utt_util_SVBI_tables <- convert_to_df(gen.dia.utt.util.SVBI)
+
+gen_dia_utt_util_IViE_tables
+gen_dia_utt_util_SVBI_tables
+```
+
+# Bootstrapping: each dialect: IViE
+```{r}
+gen_dia_utt_util_individual_dialects_IViE <- function(gen_dia_class, num_bootstrap = 1000) {
+  cue_names <- gen_dia_class$cue_type
+  dialects <- c("b", "c", "d", "j", "l", "n", "p", "s", "w")  # The provided dialect labels
+  
+  num_dialects <- length(dialects)
+  
+  # Initialize a three-dimensional array for the bootstraps
+  util_bootstraps <- array(0, dim = c(num_bootstrap, length(cue_names), num_dialects))
+  
+  for (bootstrap_index in 1:num_bootstrap) {
+    for (cue_index in 1:length(cue_names)) {
+      suppressWarnings({
+        cue_results <- gen_dia_class$gen_dia_results[[cue_index]]
+        cue_name <- cue_names[[cue_index]]
+  
+        cue_merged_results <- data.frame()
+  
+        for (split_index in 1:5) {
+          split_results <- cue_results$models_tested[[split_index]]
+          split_merged_results <- bind_rows(split_results)
+          cue_merged_results <- bind_rows(cue_merged_results, split_merged_results)
+        }
+  
+        cue_merged_results <- cue_merged_results %>%
+          filter(!is.na(posterior) & !is.nan(posterior) & utterance_type == model)
+        
+        for (dialect_index in 1:num_dialects) {
+          cue_merged_results_dialect <- cue_merged_results %>%
+            filter(dialect == dialects[dialect_index])
+          
+          # Perform bootstrapping by sampling with replacement
+          bootstrap_indices <- sample(nrow(cue_merged_results_dialect), replace = TRUE)
+          bootstrap_data <- cue_merged_results_dialect[bootstrap_indices, ]
+  
+          cue_accuracy <- get_accuracy(bootstrap_data, "utterance_type", "posterior")
+          acc <- cue_accuracy$accuracy
+          p <- mean(acc)
+          util <- log(p / (1 - p)) - log(1 / 1)
+  
+          util_bootstraps[bootstrap_index, cue_index, dialect_index] <- util
+        }
+      })
+    }
+    cat("Iteration", bootstrap_index, "of bootstrapping is done.\n")
+  }
+  
+  # Post processing to calculate confidence intervals and p-values
+  # for each cue and each dialect
+  util_summary <- list()
+  for (cue_index in 1:length(cue_names)) {
+    for (dialect_index in 1:num_dialects) {
+      bootstrap_values <- util_bootstraps[, cue_index, dialect_index]
+      lower_ci <- quantile(bootstrap_values, 0.025)
+      upper_ci <- quantile(bootstrap_values, 0.975)
+      p_value <- mean(bootstrap_values <= 0)
+      
+      util_summary[[paste(cue_names[cue_index], dialects[dialect_index], sep = "_")]] <- list(
+        Cue = cue_names[cue_index],
+        Dialect = dialects[dialect_index],
+        Utility = mean(bootstrap_values),
+        CI_Lower = lower_ci,
+        CI_Upper = upper_ci,
+        p_value = p_value
+      )
+    }
+  }
+  
+  return(util_summary)
+}
+
+
+gen.dia.utt.util.each.IViE <- gen_dia_utt_util_individual_dialects_IViE(gen.dia.class.IViE)
+gen.dia.utt.util.each.IViE
+```
+
+# Table 32 (NOT SORTED)
+```{r}
+
+```
+
+
+#Bootstrapping: each dialect: SVBI
+```{r}
+gen_dia_utt_util_individual_dialects_SVBI <- function(gen_dia_class, num_bootstrap = 1000) {
+  cue_names <- gen_dia_class$cue_type
+  dialects <- c("BEL", "CAM", "NEW")  # The provided dialect labels for SVBI
+  
+  num_dialects <- length(dialects)
+  
+  # Initialize a three-dimensional array for the bootstraps
+  util_bootstraps <- array(0, dim = c(num_bootstrap, length(cue_names), num_dialects))
+  
+  for (bootstrap_index in 1:num_bootstrap) {
+    for (cue_index in 1:length(cue_names)) {
+      suppressWarnings({
+        cue_results <- gen_dia_class$gen_dia_results[[cue_index]]
+        cue_name <- cue_names[[cue_index]]
+  
+        cue_merged_results <- data.frame()
+  
+        for (split_index in 1:5) {
+          split_results <- cue_results$models_tested[[split_index]]
+          split_merged_results <- bind_rows(split_results)
+          cue_merged_results <- bind_rows(cue_merged_results, split_merged_results)
+        }
+  
+        cue_merged_results <- cue_merged_results %>%
+          filter(!is.na(posterior) & !is.nan(posterior) & utterance_type == model)
+        
+        for (dialect_index in 1:num_dialects) {
+          cue_merged_results_dialect <- cue_merged_results %>%
+            filter(dialect == dialects[dialect_index])
+          
+          # Perform bootstrapping by sampling with replacement
+          bootstrap_indices <- sample(nrow(cue_merged_results_dialect), replace = TRUE)
+          bootstrap_data <- cue_merged_results_dialect[bootstrap_indices, ]
+  
+          cue_accuracy <- get_accuracy(bootstrap_data, "utterance_type", "posterior")
+          acc <- cue_accuracy$accuracy
+          p <- mean(acc)
+          util <- log(p / (1 - p)) - log(1 / 1)
+  
+          util_bootstraps[bootstrap_index, cue_index, dialect_index] <- util
+        }
+      })
+    }
+    cat("Iteration", bootstrap_index, "of bootstrapping is done.\n")
+  }
+  
+  # Post processing to calculate confidence intervals and p-values
+  # for each cue and each dialect
+  util_summary <- list()
+  for (cue_index in 1:length(cue_names)) {
+    for (dialect_index in 1:num_dialects) {
+      bootstrap_values <- util_bootstraps[, cue_index, dialect_index]
+      lower_ci <- quantile(bootstrap_values, 0.025)
+      upper_ci <- quantile(bootstrap_values, 0.975)
+      p_value <- mean(bootstrap_values <= 0)
+      
+      util_summary[[paste(cue_names[cue_index], dialects[dialect_index], sep = "_")]] <- list(
+        Cue = cue_names[cue_index],
+        Dialect = dialects[dialect_index],
+        Utility = mean(bootstrap_values),
+        CI_Lower = lower_ci,
+        CI_Upper = upper_ci,
+        p_value = p_value
+      )
+    }
+  }
+  
+  return(util_summary)
+}
+
+gen.dia.utt.util.each.SVBI <- gen_dia_utt_util_individual_dialects_SVBI(gen.dia.class.SVBI)
+gen.dia.utt.util.each.SVBI
+
+
+# Save the results to an RData file
+save(gen.dia.utt.util.each.IViE, gen.dia.utt.util.each.SVBI, file = "gen_dia_util_each.RData")
+
+```
+
+# Table 33 (NOT SORTED)
+```{r}
+
+```
+
+## Utility: Talker specific
+```{r}
+temp.tal <- function(data) {
+  data %>% 
+    group_by(cue_type, utterance_type, talker) %>%
+    nest() %>% 
+    mutate(data = map(data, ~.x %>%
+                       mutate(split = ntile(runif(nrow(.)), 5))))
+}
+
+temp.tal.SVBI <- temp.dia(SVBI_long)
+
+tal.class <- function(data_class) {
+  data_class %>%
+    unnest(data) %>%
+    group_by(cue_type) %>% 
+    nest() %>% 
+    mutate(
+      tal.results = map(data, ~ .x %>%
+          group_by(talker, utterance_type) %>%
+          droplevels(.) %>%
+          train_test_split(holdout='split') %>%
+          mutate(
+            models_trained = map(data_train,
+                                 ~ .x %>%
+                                   group_by(talker) %>% 
+                                   train_models(grouping = "utterance_type", cues = "cue_value", add_groups = TRUE)),
+            models_tested = map2(data_test, models_trained, 
+                                 classify, category = "utterance_type"))
+          )
+      )
+}
+
+tal.class.SVBI <- tal.class(temp.tal.SVBI)
+
+tal.class.SVBI
+```
+
+# Bootstrapping: talker
+```{r}
+tal_util <- function(tal_class) {
+  num_bootstrap <- 1000
+  util_bootstraps <- matrix(0, nrow = num_bootstrap, ncol = 5)
+  cue_names <- tal_class$cue_type
+  
+  for (bootstrap_index in 1:num_bootstrap) {
+    bootstrap_util_list <- vector("numeric", length = 5)
+  
+    for (cue_index in 1:5) {
+      suppressWarnings({
+        cue_results <- tal_class$tal.results[[cue_index]]
+        cue_name <- cue_names[[cue_index]]
+  
+        cue_merged_results <- data.frame()
+  
+        for (split_index in 1:5) {
+          split_results <- cue_results$models_tested[[split_index]]
+          split_merged_results <- bind_rows(split_results)
+          cue_merged_results <- bind_rows(cue_merged_results, split_merged_results)
+        }
+  
+        cue_merged_results <- cue_merged_results %>%
+          filter(!is.na(posterior) & !is.nan(posterior) & utterance_type == model)
+  
+        # Perform bootstrapping by sampling with replacement
+        bootstrap_indices <- sample(nrow(cue_merged_results), replace = TRUE)
+        bootstrap_data <- cue_merged_results[bootstrap_indices, ]
+  
+        cue_accuracy <- get_accuracy(bootstrap_data, "utterance_type", "posterior") 
+        acc <- cue_accuracy$accuracy
+        p <- mean(acc)
+        util <- log(p / (1 - p)) - log(1 / 1)
+  
+        bootstrap_util_list[cue_index] <- util
+      })
+    }
+  
+    util_bootstraps[bootstrap_index, ] <- bootstrap_util_list
+    # Print completion of each iteration
+    cat("Iteration", bootstrap_index, "of bootstrapping is done.\n")
+  }
+  
+  # Calculate the 95% confidence interval and p-value for each cue
+  lower_ci <- apply(util_bootstraps, 2, function(x) quantile(x, 0.025))
+  upper_ci <- apply(util_bootstraps, 2, function(x) quantile(x, 0.975))
+  p_values <- colMeans(util_bootstraps <= 0)
+  
+  tal.util <- list()
+  
+  # Calculate the utility and confidence intervals for each cue
+  for (cue_index in 1:5) {
+    cue_name <- cue_names[[cue_index]]
+  
+    # Store the results in a list
+    cue_results <- list(
+      Cue = cue_name,
+      Utility = mean(util_bootstraps[, cue_index]),
+      CI_Lower = lower_ci[cue_index],
+      CI_Upper = upper_ci[cue_index],
+      p_value = p_values[cue_index]
+    )
+    
+    # Add the cue results to the gen.util
+    tal.util[[cue_index]] <- cue_results
+  }
+  
+  return(tal.util)
+}
+
+tal.util.SVBI <- tal_util(tal.class.SVBI)
+
+save(tal.util.SVBI, file = "tal_util_SVBI.RData")
+load("tal_util_SVBI.RData")
+
+tal.util.SVBI
+```
+
+# Table 34
+```{r}
+# Function to convert nested list to data frame
+tal_util_table <- function(nested_list) {
+  df <- do.call(rbind, lapply(nested_list, function(x) {
+    data.frame(
+      Cue = x$Cue,
+      Utility = round(x$Utility, 2),
+      CI_Lower = round(x$CI_Lower, 2),
+      CI_Upper = round(x$CI_Upper, 2),
+      p_value = round(x$p_value, 2)
+      
+    )
+  }))
+  
+  return(df)
+}
+
+tal_util_SVBI_table <- tal_util_table(tal.util.SVBI)
+
+tal_util_SVBI_table
+```
+
+#Bootstrapping: dec/dqu
+
+```{r}
+tal.utt.util <- function(tal_class, num_bootstrap = 1000) {
+  util_bootstraps_dec <- matrix(0, nrow = num_bootstrap, ncol = 5)
+  util_bootstraps_dqu <- matrix(0, nrow = num_bootstrap, ncol = 5)
+  cue_names <- tal_class$cue_type
+  
+  for (bootstrap_index in 1:num_bootstrap) {
+    bootstrap_util_list_dec <- vector("numeric", length = 5)
+    bootstrap_util_list_dqu <- vector("numeric", length = 5)
+  
+    for (cue_index in 1:5) {
+      suppressWarnings({
+        cue_results <- tal_class$tal.results[[cue_index]]
+        cue_name <- cue_names[[cue_index]]
+  
+        cue_merged_results <- data.frame()
+  
+        for (split_index in 1:5) {
+          split_results <- cue_results$models_tested[[split_index]]
+          split_merged_results <- bind_rows(split_results)
+          cue_merged_results <- bind_rows(cue_merged_results, split_merged_results)
+        }
+  
+        cue_merged_results <- cue_merged_results %>%
+          filter(!is.na(posterior) & !is.nan(posterior) & utterance_type == model)
+  
+        cue_merged_results_dec <- cue_merged_results %>%
+          filter(utterance_type == "dec")
+  
+        cue_merged_results_dqu <- cue_merged_results %>%
+          filter(utterance_type == "dqu")
+  
+        bootstrap_indices_dec <- sample(nrow(cue_merged_results_dec), replace = TRUE)
+        bootstrap_data_dec <- cue_merged_results_dec[bootstrap_indices_dec, ]
+        cue_accuracy_dec <- get_accuracy(bootstrap_data_dec, "utterance_type", "posterior")
+        acc_dec <- cue_accuracy_dec$accuracy
+        util_dec <- log(mean(acc_dec) / (1 - mean(acc_dec))) - log(1 / 1)
+        bootstrap_util_list_dec[cue_index] <- util_dec
+  
+        bootstrap_indices_dqu <- sample(nrow(cue_merged_results_dqu), replace = TRUE)
+        bootstrap_data_dqu <- cue_merged_results_dqu[bootstrap_indices_dqu, ]
+        cue_accuracy_dqu <- get_accuracy(bootstrap_data_dqu, "utterance_type", "posterior")
+        acc_dqu <- cue_accuracy_dqu$accuracy
+        util_dqu <- log(mean(acc_dqu) / (1 - mean(acc_dqu))) - log(1 / 1)
+        bootstrap_util_list_dqu[cue_index] <- util_dqu
+      })
+    }
+  
+    util_bootstraps_dec[bootstrap_index, ] <- bootstrap_util_list_dec
+    util_bootstraps_dqu[bootstrap_index, ] <- bootstrap_util_list_dqu
+  
+    cat("Iteration", bootstrap_index, "of bootstrapping is done.\n")
+  }
+  
+  lower_ci_dec <- apply(util_bootstraps_dec, 2, function(x) quantile(x, 0.025))
+  upper_ci_dec <- apply(util_bootstraps_dec, 2, function(x) quantile(x, 0.975))
+  lower_ci_dqu <- apply(util_bootstraps_dqu, 2, function(x) quantile(x, 0.025))
+  upper_ci_dqu <- apply(util_bootstraps_dqu, 2, function(x) quantile(x, 0.975))
+  
+  p_values_dec <- colMeans(util_bootstraps_dec <= 0)
+  p_values_dqu <- colMeans(util_bootstraps_dqu <= 0)
+  
+  tables_list <- list()
+
+for (cue_index in 1:5) {
+  cue_name <- cue_names[[cue_index]]
+
+  results_table <- data.frame(
+    Cue = cue_name,
+    "Utility for utterance_type 'dec'" = mean(util_bootstraps_dec[, cue_index]),
+    "Lower CI for utterance_type 'dec'" = lower_ci_dec[cue_index],
+    "Upper CI for utterance_type 'dec'" = upper_ci_dec[cue_index],
+    "P-values for utterance_type 'dec'" = p_values_dec[cue_index],
+    "Utility for utterance_type 'dqu'" = mean(util_bootstraps_dqu[, cue_index]),
+    "Lower CI for utterance_type 'dqu'" = lower_ci_dqu[cue_index],
+    "Upper CI for utterance_type 'dqu'" = upper_ci_dqu[cue_index],
+    "P-values for utterance_type 'dqu'" = p_values_dqu[cue_index],
+    stringsAsFactors = FALSE
+  )
+
+  tables_list[[cue_name]] <- results_table
+}
+
+  return(tables_list)
+}
+
+tal.utt.util.SVBI <- tal.utt.util(tal.class.SVBI)
+tal.utt.util.SVBI
+save(tal.utt.util.SVBI, file = "tal_utt_util.RData")
+
+
+
+```
+
+# Table 35
+```{r}
+tal.utt.util.SVBI <- do.call(rbind, tal.utt.util.SVBI)
+rownames(tal.utt.util.SVBI) <- NULL
+tal.utt.util.SVBI
+```
+
